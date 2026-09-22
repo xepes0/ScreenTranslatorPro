@@ -678,6 +678,36 @@ final class TranslationService: Sendable {
 
         let provider = try makeProvider(kind)
 
+        if kind == .baiduFast,
+           let baidu = provider as? BaiduTextTranslator {
+            let joined = items.map(\.text).joined(separator: "\n")
+
+            // 大多数屏幕文字一次请求即可完成，网络往返从 N 次降到 1 次。
+            if joined.utf8.count <= 5_500 {
+                do {
+                    let batch = try await baidu.translate(
+                        text: joined,
+                        source: source,
+                        target: target
+                    )
+                    let lines = batch.split(
+                        separator: "\n",
+                        omittingEmptySubsequences: false
+                    ).map(String.init)
+
+                    if lines.count == items.count {
+                        return zip(items, lines).map { item, value in
+                            var copy = item
+                            copy.translation = value
+                            return copy
+                        }
+                    }
+                } catch {
+                    // 批量失败时自动回退到下面的并发逐条翻译。
+                }
+            }
+        }
+
         if kind == .baiduText {
             var output: [OCRResult] = []
             output.reserveCapacity(items.count)
