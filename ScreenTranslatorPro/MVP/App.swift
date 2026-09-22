@@ -47,7 +47,7 @@ struct ContentView: View {
                         ContentUnavailableView(
                             "Screen Translator Pro",
                             systemImage: "viewfinder",
-                            description: Text("配置一次翻译服务后，可直接用快捷指令：截屏 → 翻译截图 → 快速查看，无需先打开 App。")
+                            description: Text("配置一次翻译服务后，可直接用快捷指令：截屏 → 翻译截图。完成后会打开全屏译图预览。")
                         )
                     }
 
@@ -137,6 +137,12 @@ struct ContentView: View {
     private func dismissPreview() {
         previewImage = nil
         PreviewStore.clear()
+
+        // 自签测试版使用系统未公开的 suspend selector：
+        // 预览关闭后立即把本 App 放回后台，露出翻译前正在使用的 App。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            _ = UIApplication.shared.perform(NSSelectorFromString("suspend"))
+        }
     }
 }
 
@@ -145,28 +151,60 @@ private struct TranslatedPreviewView: View {
     let onClose: () -> Void
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        GeometryReader { proxy in
+            let horizontalInset: CGFloat = 14
+            let controlHeight: CGFloat = 112
+            let imageHeight = max(200, proxy.size.height - controlHeight)
 
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .ignoresSafeArea(edges: .horizontal)
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            HStack(spacing: 12) {
-                Button(action: onClose) {
-                    Text("关闭")
-                        .font(.title3.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 56)
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    ZStack {
+                        Color.black
+
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(
+                                width: max(1, proxy.size.width - horizontalInset * 2),
+                                height: imageHeight - 8
+                            )
+                    }
+                    .frame(height: imageHeight)
+
+                    HStack(spacing: 14) {
+                        Button(action: onClose) {
+                            Text("取消")
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 62)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 28)
+                                        .fill(Color.white.opacity(0.18))
+                                )
+                        }
+
+                        Button(action: onClose) {
+                            Text("完成")
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 62)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 28)
+                                        .fill(Color.accentColor)
+                                )
+                        }
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.top, 10)
+                    .padding(.bottom, max(8, proxy.safeAreaInsets.bottom))
+                    .frame(height: controlHeight)
+                    .background(.ultraThinMaterial)
                 }
-                .buttonStyle(.borderedProminent)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
-            .background(.ultraThinMaterial)
         }
         .statusBarHidden(false)
     }
@@ -259,7 +297,7 @@ struct SettingsView: View {
             }
 
             Section("快捷指令") {
-                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」。无需“快速查看”，翻译结果会以系统结果卡片显示，并在底部提供“完成”按钮，不会跳回 App。")
+                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」。翻译完成后显示自定义全屏译图，底部固定“取消 / 完成”；关闭后会回到翻译前的 App。")
                     .font(.footnote)
             }
 
