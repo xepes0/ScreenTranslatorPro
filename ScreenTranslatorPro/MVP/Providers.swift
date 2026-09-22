@@ -331,40 +331,148 @@ private extension Data {
     }
 }
 
-final class TranslationService: Sendable {
-    func translate(_ items:[OCRResult], source:String, target:String) async throws -> [OCRResult] {
-        guard !items.isEmpty else { throw ScreenTranslatorError.noTextFound }
-        let kind=AppConfiguration.provider
-        if kind == .localOCR {
-            return items.map { var copy=$0; copy.translation=$0.text; return copy }
+private actor TranslationMemory {
+    static let shared = TranslationMemory()
+
+    private var values: [String: String] = [:]
+    private let maxEntries = 500
+
+    func value(for key: String) -> String? {
+        values[key]
+    }
+
+    func store(_ value: String, for key: String) {
+        if values.count >= maxEntries, let first = values.keys.first {
+            values.removeValue(forKey: first)
         }
+        values[key] = value
+    }
+}
+
+final class TranslationService: Sendable {
+    func translate(_ items: [OCRResult], source: String, target: String) async throws -> [OCRResult] {
+        guard !items.isEmpty else { throw ScreenTranslatorError.noTextFound }
+
+        let kind = AppConfiguration.provider
+        if kind == .localOCR {
+            return items.map {
+                var copy = $0
+                copy.translation = $0.text
+                return copy
+            }
+        }
+
         if kind == .baiduImageCloud {
             throw ScreenTranslatorError.invalidResponse("百度图片翻译应走整图翻译流程")
         }
-        let provider=try makeProvider(kind)
-        var output:[OCRResult]=[]
-        for (index,item) in items.enumerated() {
-            var copy=item
-            copy.translation=try await provider.translate(text:item.text,source:source,target:target)
-            output.append(copy)
-            if kind == .baiduText && index < items.count-1 {
-                try await Task.sleep(for:.milliseconds(1050))
+
+        let provider = try makeProvider(kind)
+
+        if kind == .baiduText {
+            var output: [OCRResult] = []
+            output.reserveCapacity(items.count)
+
+            for (index, item) in items.enumerated() {
+                output.append(try await translateOne(
+                    item,
+                    provider: provider,
+                    kind: kind,
+                    source: source,
+                    target: target
+                ))
+
+                if index < items.count - 1 {
+                    try await Task.sleep(for: .milliseconds(1050))
+                }
+            }
+            return output
+        }
+
+        // DeepL / OpenAI-Compatible 最多并发 4 条，明显降低整屏等待时间，
+        // 同时避免一次性对 API 造成过多并发请求。
+        var translated = Array<OCRResult?>(repeating: nil, count: items.count)
+        let indexed = Array(items.enumerated())
+        let chunkSize = 4
+
+        for chunkStart in stride(from: 0, to: indexed.count, by: chunkSize) {
+            let end = min(chunkStart + chunkSize, indexed.count)
+            let chunk = Array(indexed[chunkStart..<end])
+
+            try await withThrowingTaskGroup(of: (Int, OCRResult).self) { group in
+                for (index, item) in chunk {
+                    group.addTask {
+                        let result = try await self.translateOne(
+                            item,
+                            provider: provider,
+                            kind: kind,
+                            source: source,
+                            target: target
+                        )
+                        return (index, result)
+                    }
+                }
+
+                for try await (index, result) in group {
+                    translated[index] = result
+                }
             }
         }
-        return output
+
+        return translated.compactMap { $0 }
     }
 
-    private func makeProvider(_ kind:ProviderKind) throws -> any TextTranslationProvider {
+    private func translateOne(
+        _ item: OCRResult,
+        provider: any TextTranslationProvider,
+        kind: ProviderKind,
+        source: String,
+        target: String
+    ) async throws -> OCRResult {
+        let key = [kind.rawValue, source, target, item.text].joined(separator: "\u{001F}")
+
+        if let cached = await TranslationMemory.shared.value(for: key) {
+            var copy = item
+            copy.translation = cached
+            return copy
+        }
+
+        let value = try await provider.translate(
+            text: item.text,
+            source: source,
+            target: target
+        )
+        await TranslationMemory.shared.store(value, for: key)
+
+        var copy = item
+        copy.translation = value
+        return copy
+    }
+
+    private func makeProvider(_ kind: ProviderKind) throws -> any TextTranslationProvider {
         switch kind {
-        case .localOCR: throw ScreenTranslatorError.invalidResponse("本地 OCR 不需要远程 Provider")
+        case .localOCR:
+            throw ScreenTranslatorError.invalidResponse("本地 OCR 不需要远程 Provider")
+
         case .baiduText:
-            return BaiduTextTranslator(appID:AppConfiguration.baiduAppID,secret:SecretStore.shared.read(.baiduSecret) ?? "")
+            return BaiduTextTranslator(
+                appID: AppConfiguration.baiduAppID,
+                secret: SecretStore.shared.read(.baiduSecret) ?? ""
+            )
+
         case .baiduImageCloud:
             throw ScreenTranslatorError.invalidResponse("百度图片翻译不是文本 Provider")
+
         case .deepL:
-            return DeepLTranslator(authKey:SecretStore.shared.read(.deepLKey) ?? "")
+            return DeepLTranslator(
+                authKey: SecretStore.shared.read(.deepLKey) ?? ""
+            )
+
         case .openAICompatible:
-            return OpenAICompatibleTranslator(apiKey:SecretStore.shared.read(.openAIKey) ?? "",endpoint:AppConfiguration.openAIEndpoint,model:AppConfiguration.openAIModel)
+            return OpenAICompatibleTranslator(
+                apiKey: SecretStore.shared.read(.openAIKey) ?? "",
+                endpoint: AppConfiguration.openAIEndpoint,
+                model: AppConfiguration.openAIModel
+            )
         }
     }
 }
