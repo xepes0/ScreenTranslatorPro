@@ -22,13 +22,13 @@ struct OCRResult: Identifiable, Sendable {
 }
 
 enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
-    case localOCR, baiduText, baiduImageCloud, deepL, openAICompatible
+    case localOCR, baiduText, baiduImageOpen, deepL, openAICompatible
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .localOCR: return "本地 OCR（不翻译）"
         case .baiduText: return "百度通用文本翻译"
-        case .baiduImageCloud: return "百度图片翻译（整图回填）"
+        case .baiduImageOpen: return "百度图片翻译（APP ID + Key）"
         case .deepL: return "DeepL"
         case .openAICompatible: return "OpenAI-Compatible"
         }
@@ -261,10 +261,10 @@ final class ScreenTranslationEngine {
         let source = AppConfiguration.sourceLanguage
         let target = AppConfiguration.targetLanguage
 
-        if AppConfiguration.provider == .baiduImageCloud {
-            let provider = BaiduCloudImageTranslator(
-                apiKey: SecretStore.shared.read(.baiduCloudAPIKey) ?? "",
-                secretKey: SecretStore.shared.read(.baiduCloudSecretKey) ?? ""
+        if AppConfiguration.provider == .baiduImageOpen {
+            let provider = BaiduOpenPlatformImageTranslator(
+                appID: AppConfiguration.baiduAppID,
+                secret: SecretStore.shared.read(.baiduSecret) ?? ""
             )
             let output = try await provider.translate(image: image, source: source, target: target)
             return ScreenTranslationResult(image: output, items: [])
