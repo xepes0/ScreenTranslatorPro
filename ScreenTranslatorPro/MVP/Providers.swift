@@ -150,7 +150,8 @@ struct BaiduOpenPlatformImageTranslator: Sendable {
             URLQueryItem(name: "sign", value: sign),
             URLQueryItem(name: "cuid", value: cuid),
             URLQueryItem(name: "mac", value: mac),
-            URLQueryItem(name: "version", value: "3")
+            URLQueryItem(name: "version", value: "3"),
+            URLQueryItem(name: "paste", value: "1")
         ]
 
         guard let url = components.url else {
@@ -186,21 +187,92 @@ struct BaiduOpenPlatformImageTranslator: Sendable {
             throw ScreenTranslatorError.invalidResponse("百度图片翻译错误 \(errorCode)：\(message)")
         }
 
-        var pasteBase64 = root["pasteImg"] as? String
-        if pasteBase64 == nil,
-           let content = root["content"] as? [[String: Any]] {
-            pasteBase64 = content.compactMap { $0["pasteImg"] as? String }.first(where: { !$0.isEmpty })
+        // V1 成功响应的主要结构是 root["data"]["pasteImg"]。
+        // 同时兼容少数历史返回把 pasteImg 放在根节点或 content 中。
+        let payload = root["data"] as? [String: Any]
+        var pasteBase64 = payload?["pasteImg"] as? String
+
+        if pasteBase64 == nil {
+            pasteBase64 = root["pasteImg"] as? String
         }
 
-        guard
-            let pasteBase64,
-            let pasteData = Data(base64Encoded: pasteBase64, options: .ignoreUnknownCharacters),
-            let output = UIImage(data: pasteData)
-        else {
-            throw ScreenTranslatorError.invalidResponse("百度未返回 pasteImg，请确认已开通图片翻译 API")
+        let content =
+            (payload?["content"] as? [[String: Any]]) ??
+            (root["content"] as? [[String: Any]]) ??
+            []
+
+        if pasteBase64 == nil {
+            pasteBase64 = content
+                .compactMap { $0["pasteImg"] as? String }
+                .first(where: { !$0.isEmpty })
         }
 
-        return output
+        if let pasteBase64,
+           let pasteData = Data(base64Encoded: pasteBase64, options: .ignoreUnknownCharacters),
+           let output = UIImage(data: pasteData) {
+            return output
+        }
+
+        // 有些账号/场景即使翻译成功也可能不返回整图贴合。
+        // 此时使用百度返回的 dst + rect 在本机原位回填，避免整个快捷指令失败。
+        let fallbackItems = Self.fallbackItems(from: content, imageSize: image.size)
+        if !fallbackItems.isEmpty {
+            return OverlayRenderer().render(original: image, items: fallbackItems)
+        }
+
+        let translatedText =
+            (payload?["sumDst"] as? String) ??
+            (root["sumDst"] as? String) ??
+            ""
+        if !translatedText.isEmpty {
+            throw ScreenTranslatorError.invalidResponse("百度翻译成功但未返回贴合图/坐标；译文：\(translatedText.prefix(120))")
+        }
+
+        let keys = payload.map { Array($0.keys).sorted().joined(separator: ",") } ?? "nil"
+        throw ScreenTranslatorError.invalidResponse("百度成功响应未包含 pasteImg；data keys=\(keys)")
+    }
+
+    private static func fallbackItems(
+        from content: [[String: Any]],
+        imageSize: CGSize
+    ) -> [OCRResult] {
+        guard imageSize.width > 0, imageSize.height > 0 else { return [] }
+
+        return content.compactMap { item in
+            guard
+                let dst = item["dst"] as? String,
+                !dst.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                let rectString = item["rect"] as? String
+            else { return nil }
+
+            let numbers = rectString
+                .split(whereSeparator: { $0 == " " || $0 == "," })
+                .compactMap { Double($0) }
+
+            guard numbers.count >= 4 else { return nil }
+
+            let left = CGFloat(numbers[0])
+            let top = CGFloat(numbers[1])
+            let width = CGFloat(numbers[2])
+            let height = CGFloat(numbers[3])
+
+            guard width > 0, height > 0 else { return nil }
+
+            // 百度 rect 以左上角为原点；Vision boundingBox 以左下角为原点、0...1 归一化。
+            let visionRect = CGRect(
+                x: left / imageSize.width,
+                y: 1 - ((top + height) / imageSize.height),
+                width: width / imageSize.width,
+                height: height / imageSize.height
+            )
+
+            return OCRResult(
+                text: (item["src"] as? String) ?? "",
+                boundingBox: visionRect,
+                confidence: 1,
+                translation: dst
+            )
+        }
     }
 
     private static func md5Hex(_ data: Data) -> String {
