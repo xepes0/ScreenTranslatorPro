@@ -15,25 +15,55 @@ struct BaiduTextTranslator: TextTranslationProvider {
     func translate(text: String, source: String, target: String) async throws -> String {
         guard !appID.isEmpty else { throw ScreenTranslatorError.missingCredential("百度 APP ID") }
         guard !secret.isEmpty else { throw ScreenTranslatorError.missingCredential("百度密钥") }
-        let salt = String(UInt64.random(in: 100000...999999999))
-        let digest = Insecure.MD5.hash(data: Data((appID + text + salt + secret).utf8))
-        let sign = digest.map { String(format: "%02x", $0) }.joined()
 
-        var request = URLRequest(url: URL(string: "https://fanyi-api.baidu.com/api/trans/vip/translate")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.httpBody = formBody(["q": text, "from": source.isEmpty ? "auto" : source, "to": target, "appid": appID, "salt": salt, "sign": sign])
+        var lastError: Error?
+        for attempt in 0..<3 {
+            do {
+                let salt = String(UInt64.random(in: 100000...999999999))
+                let digest = Insecure.MD5.hash(data: Data((appID + text + salt + secret).utf8))
+                let sign = digest.map { String(format: "%02x", $0) }.joined()
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw ScreenTranslatorError.invalidResponse("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                var request = URLRequest(url: URL(string: "https://fanyi-api.baidu.com/api/trans/vip/translate")!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 12
+                request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+                request.httpBody = formBody([
+                    "q": text,
+                    "from": source.isEmpty ? "auto" : source,
+                    "to": target,
+                    "appid": appID,
+                    "salt": salt,
+                    "sign": sign
+                ])
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                    throw ScreenTranslatorError.invalidResponse("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                }
+
+                let decoded = try JSONDecoder().decode(BaiduResponse.self, from: data)
+                if let code = decoded.errorCode {
+                    if (code == "54003" || code == "54005"), attempt < 2 {
+                        try await Task.sleep(for: .milliseconds(450 * (attempt + 1)))
+                        continue
+                    }
+                    throw ScreenTranslatorError.invalidResponse("百度错误 \(code)：\(decoded.errorMsg ?? "unknown")")
+                }
+
+                let output = decoded.transResult?.map(\.dst).joined(separator: "\n") ?? ""
+                guard !output.isEmpty else {
+                    throw ScreenTranslatorError.invalidResponse("百度返回空译文")
+                }
+                return output
+            } catch {
+                lastError = error
+                if attempt < 2 {
+                    try await Task.sleep(for: .milliseconds(250 * (attempt + 1)))
+                }
+            }
         }
-        let decoded = try JSONDecoder().decode(BaiduResponse.self, from: data)
-        if let code = decoded.errorCode { throw ScreenTranslatorError.invalidResponse("百度错误 \(code)：\(decoded.errorMsg ?? "unknown")") }
-        let output = decoded.transResult?.map(\.dst).joined(separator: "\n") ?? ""
-        guard !output.isEmpty else { throw ScreenTranslatorError.invalidResponse("百度返回空译文") }
-        return output
+
+        throw lastError ?? ScreenTranslatorError.invalidResponse("百度翻译失败")
     }
 
     private func formBody(_ values: [String:String]) -> Data {
@@ -668,11 +698,11 @@ final class TranslationService: Sendable {
             return output
         }
 
-        // DeepL / OpenAI-Compatible 最多并发 4 条，明显降低整屏等待时间，
-        // 同时避免一次性对 API 造成过多并发请求。
+        // 快速模式允许最多 4 条并发；如果账号触发百度频控，
+        // BaiduTextTranslator 会自动短暂退避并重试。
         var translated = Array<OCRResult?>(repeating: nil, count: items.count)
         let indexed = Array(items.enumerated())
-        let chunkSize = 4
+        let chunkSize = kind == .baiduFast ? 4 : 4
 
         for chunkStart in stride(from: 0, to: indexed.count, by: chunkSize) {
             let end = min(chunkStart + chunkSize, indexed.count)
@@ -733,7 +763,7 @@ final class TranslationService: Sendable {
         case .localOCR:
             throw ScreenTranslatorError.invalidResponse("本地 OCR 不需要远程 Provider")
 
-        case .baiduText:
+        case .baiduFast, .baiduText:
             return BaiduTextTranslator(
                 appID: AppConfiguration.baiduAppID,
                 secret: SecretStore.shared.read(.baiduSecret) ?? ""
