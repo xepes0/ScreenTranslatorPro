@@ -250,7 +250,7 @@ struct SettingsView: View {
             }
 
             Section("快捷指令") {
-                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」。翻译完成后 App 会自动弹出自定义预览，关闭按钮在底部，不再需要“快速查看”。")
+                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」。无需“快速查看”，翻译结果会以系统结果卡片显示，并在底部提供“完成”按钮，不会跳回 App。")
                     .font(.footnote)
             }
 
