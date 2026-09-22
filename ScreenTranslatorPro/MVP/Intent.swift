@@ -6,11 +6,10 @@ struct TranslateScreenshotIntent: AppIntent {
     static var title: LocalizedStringResource = "翻译截图"
     static var description = IntentDescription("接收当前截图并翻译，然后打开全屏译图预览。")
 
-    // 先在后台完成截图翻译，结束时再把 ScreenTranslatorPro 拉到前台。
-    // 这样 perform() 开始时仍有机会记录真正的来源 App。
+    // 先后台翻译；完成后由 perform() 显式请求进入前台。
     static var supportedModes: IntentModes = [
         .background,
-        .foreground(.deferred)
+        .foreground(.dynamic)
     ]
 
     @Parameter(
@@ -31,8 +30,12 @@ struct TranslateScreenshotIntent: AppIntent {
         let result = try await ScreenTranslationEngine().process(image: image)
         try PreviewStore.save(result.image)
 
-        // deferred foreground mode 会在 perform 结束后把 App 拉到前台，
-        // ContentView 会读取 PreviewStore 并显示全屏译图。
+        // iOS 26+ 不依赖 deferred 自动切前台，明确请求前台切换。
+        if systemContext.currentMode == .background,
+           systemContext.currentMode.canContinueInForeground {
+            try await continueInForeground()
+        }
+
         return .result()
     }
 }
