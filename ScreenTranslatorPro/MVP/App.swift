@@ -14,7 +14,6 @@ struct ContentView: View {
     @State private var translatedImage: UIImage?
     @State private var isWorking = false
     @State private var errorMessage: String?
-    @State private var previewImage: UIImage?
 
     var body: some View {
         NavigationStack {
@@ -47,7 +46,7 @@ struct ContentView: View {
                         ContentUnavailableView(
                             "Screen Translator Pro",
                             systemImage: "viewfinder",
-                            description: Text("配置一次翻译服务后，可直接用快捷指令：截屏 → 翻译截图。完成后会打开全屏译图预览。")
+                            description: Text("配置一次翻译服务后，可直接用快捷指令：截屏 → 翻译截图 → 快速查看。")
                         )
                     }
 
@@ -77,28 +76,6 @@ struct ContentView: View {
                     errorMessage = error.localizedDescription
                 }
             }
-            .onAppear(perform: presentPendingPreviewIfNeeded)
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .active {
-                    presentPendingPreviewIfNeeded()
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .translatedPreviewReady)) { _ in
-                presentPendingPreviewIfNeeded()
-            }
-            .fullScreenCover(
-                isPresented: Binding(
-                    get: { previewImage != nil },
-                    set: { if !$0 { dismissPreview() } }
-                )
-            ) {
-                if let previewImage {
-                    TranslatedPreviewView(
-                        image: previewImage,
-                        onClose: dismissPreview
-                    )
-                }
-            }
         }
     }
 
@@ -124,89 +101,6 @@ struct ContentView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-    private func presentPendingPreviewIfNeeded() {
-        guard previewImage == nil,
-              let image = PreviewStore.loadPendingImage()
-        else { return }
-
-        previewImage = image
-        PreviewStore.markPresented()
-    }
-
-    private func dismissPreview() {
-        previewImage = nil
-        PreviewStore.clear()
-
-        // 直接重新激活触发翻译前的 App。
-        // 如果系统拒绝私有调用，就停留在本 App，不再强制 suspend 到主屏幕。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            _ = ReturnTargetStore.openCapturedApplication()
-        }
-    }
-}
-
-private struct TranslatedPreviewView: View {
-    let image: UIImage
-    let onClose: () -> Void
-
-    var body: some View {
-        GeometryReader { proxy in
-            let horizontalInset: CGFloat = 14
-            let controlHeight: CGFloat = 112
-            let imageHeight = max(200, proxy.size.height - controlHeight)
-
-            ZStack {
-                Color.black.ignoresSafeArea()
-
-                VStack(spacing: 0) {
-                    ZStack {
-                        Color.black
-
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(
-                                width: max(1, proxy.size.width - horizontalInset * 2),
-                                height: imageHeight - 8
-                            )
-                    }
-                    .frame(height: imageHeight)
-
-                    HStack(spacing: 14) {
-                        Button(action: onClose) {
-                            Text("取消")
-                                .font(.title3.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 62)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 28)
-                                        .fill(Color.white.opacity(0.18))
-                                )
-                        }
-
-                        Button(action: onClose) {
-                            Text("完成")
-                                .font(.title3.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 62)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 28)
-                                        .fill(Color.accentColor)
-                                )
-                        }
-                    }
-                    .padding(.horizontal, 22)
-                    .padding(.top, 10)
-                    .padding(.bottom, max(8, proxy.safeAreaInsets.bottom))
-                    .frame(height: controlHeight)
-                    .background(.ultraThinMaterial)
-                }
-            }
-        }
-        .statusBarHidden(false)
     }
 }
 
@@ -297,7 +191,7 @@ struct SettingsView: View {
             }
 
             Section("快捷指令") {
-                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」。翻译先在后台完成，再显示全屏译图；点击“取消 / 完成”会尝试直接重新打开翻译前正在使用的 App。")
+                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」③ 快速查看。使用系统图片预览，关闭按钮在左上角；关闭后会回到原 App。")
                     .font(.footnote)
             }
 
