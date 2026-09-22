@@ -132,7 +132,7 @@ final class VisionOCRManager {
             }
             request.recognitionLevel = fast ? .fast : .accurate
             request.usesLanguageCorrection = true
-            request.minimumTextHeight = 0.008
+            request.minimumTextHeight = fast ? 0.0035 : 0.006
             if let lang = Self.visionLanguage(for: sourceLanguage) { request.recognitionLanguages = [lang] }
             do {
                 try VNImageRequestHandler(
@@ -417,25 +417,26 @@ final class OverlayRenderer {
         guard !trimmed.isEmpty else { return }
 
         let foreground: UIColor = background.isDark ? .white : .black
+        let isSingleLine = !trimmed.contains("\n") && originalRect.height < imageSize.height * 0.06
 
-        // beta13 暂时保守沿用原 OCR 框高度；beta14 再专门做字号/字重匹配。
-        let drawRect = CGRect(
-            x: eraseRect.minX + 1.5,
-            y: eraseRect.minY + 0.5,
-            width: max(1, eraseRect.width - 3),
-            height: max(1, eraseRect.height - 1)
-        )
+        let horizontalInset = max(1, min(3, originalRect.height * 0.07))
+        let drawWidth = max(1, eraseRect.width - horizontalInset * 2)
 
         let font = fittingFont(
             trimmed,
             originalText: originalText,
-            rect: drawRect,
-            imageSize: imageSize
+            originalRect: originalRect,
+            availableWidth: drawWidth,
+            imageSize: imageSize,
+            singleLine: isSingleLine
         )
 
         let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .left
-        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.alignment = inferredAlignment(
+            for: originalRect,
+            imageSize: imageSize
+        )
+        paragraph.lineBreakMode = isSingleLine ? .byClipping : .byWordWrapping
         paragraph.minimumLineHeight = font.lineHeight * 0.92
         paragraph.maximumLineHeight = font.lineHeight * 1.05
 
@@ -446,18 +447,49 @@ final class OverlayRenderer {
         ]
 
         let string = NSAttributedString(string: trimmed, attributes: attributes)
+
+        if isSingleLine {
+            let measured = string.boundingRect(
+                with: CGSize(width: drawWidth, height: originalRect.height * 2.2),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            )
+
+            // 不再把 UIFont 的 lineHeight 强行塞进 OCR glyph box。
+            // 以原文字框中心为基准绘制完整 lineHeight，视觉字号会更接近原文。
+            let finalRect = CGRect(
+                x: eraseRect.minX + horizontalInset,
+                y: originalRect.midY - measured.height / 2,
+                width: drawWidth,
+                height: measured.height + 1
+            )
+
+            string.draw(
+                with: finalRect,
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            )
+            return
+        }
+
+        let drawRect = CGRect(
+            x: eraseRect.minX + horizontalInset,
+            y: eraseRect.minY,
+            width: drawWidth,
+            height: max(originalRect.height * 1.35, eraseRect.height)
+        )
+
         let measured = string.boundingRect(
             with: drawRect.size,
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             context: nil
         )
 
-        let y = drawRect.midY - min(drawRect.height, measured.height) / 2
         let finalRect = CGRect(
             x: drawRect.minX,
-            y: y,
+            y: originalRect.midY - measured.height / 2,
             width: drawRect.width,
-            height: min(drawRect.height, measured.height)
+            height: measured.height + 1
         )
 
         string.draw(
@@ -467,35 +499,77 @@ final class OverlayRenderer {
         )
     }
 
+    private func inferredAlignment(
+        for rect: CGRect,
+        imageSize: CGSize
+    ) -> NSTextAlignment {
+        // 底部导航栏/标签通常是图标下方居中布局。
+        if rect.midY > imageSize.height * 0.83,
+           rect.width < imageSize.width * 0.28 {
+            return .center
+        }
+
+        // 很窄、位于屏幕中轴附近的标题也倾向居中。
+        if abs(rect.midX - imageSize.width / 2) < imageSize.width * 0.07,
+           rect.width < imageSize.width * 0.48 {
+            return .center
+        }
+
+        return .left
+    }
+
     private func fittingFont(
         _ text: String,
         originalText: String,
-        rect: CGRect,
-        imageSize: CGSize
+        originalRect: CGRect,
+        availableWidth: CGFloat,
+        imageSize: CGSize,
+        singleLine: Bool
     ) -> UIFont {
-        var low: CGFloat = 7
-        var high = max(9, rect.height * 1.12)
+        let isLargeTitle = originalRect.height > imageSize.height * 0.028
+        let weight: UIFont.Weight = isLargeTitle ? .semibold : .regular
 
-        // 大标题先保留稍高上限，避免标题翻译后明显缩小。
-        if rect.height > imageSize.height * 0.035 {
-            high = max(high, rect.height * 1.22)
+        // OCR boundingBox 更接近“字形高度”，而 UIFont 的 lineHeight 会明显更高。
+        // 单行 UI 文本直接以 OCR 高度估算字号，再只按宽度收缩，避免字体偏小。
+        var high: CGFloat
+        if singleLine {
+            high = max(
+                9,
+                originalRect.height * (isLargeTitle ? 1.10 : 1.06)
+            )
+        } else {
+            high = max(9, originalRect.height * 1.02)
         }
 
-        let weight: UIFont.Weight = rect.height > imageSize.height * 0.03
-            ? .semibold
-            : .regular
+        var low = min(8, high)
 
-        while high - low > 0.35 {
-            let mid = (low + high) / 2
-            let font = UIFont.systemFont(ofSize: mid, weight: weight)
+        func fits(_ size: CGFloat) -> Bool {
+            let font = UIFont.systemFont(ofSize: size, weight: weight)
             let bounds = (text as NSString).boundingRect(
-                with: rect.size,
+                with: CGSize(
+                    width: availableWidth,
+                    height: singleLine ? originalRect.height * 2.2 : originalRect.height * 1.45
+                ),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [.font: font],
                 context: nil
             )
 
-            if bounds.width <= rect.width && bounds.height <= rect.height {
+            if singleLine {
+                return bounds.width <= availableWidth
+            }
+
+            return bounds.width <= availableWidth &&
+                bounds.height <= originalRect.height * 1.45
+        }
+
+        if fits(high) {
+            return .systemFont(ofSize: high, weight: weight)
+        }
+
+        while high - low > 0.30 {
+            let mid = (low + high) / 2
+            if fits(mid) {
                 low = mid
             } else {
                 high = mid
