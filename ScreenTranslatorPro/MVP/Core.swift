@@ -214,6 +214,12 @@ final class OverlayRenderer {
                     eraseRect: eraseRect
                 )
 
+                let foreground = estimatedForegroundColor(
+                    in: original,
+                    textRect: rect,
+                    background: estimate.center
+                ) ?? (estimate.center.isDark ? .white : .black)
+
                 eraseBackground(
                     in: rendererContext.cgContext,
                     rect: eraseRect,
@@ -226,7 +232,7 @@ final class OverlayRenderer {
                     in: rect,
                     eraseRect: eraseRect,
                     imageSize: original.size,
-                    background: estimate.center
+                    foreground: foreground
                 )
             }
         }
@@ -411,12 +417,10 @@ final class OverlayRenderer {
         in originalRect: CGRect,
         eraseRect: CGRect,
         imageSize: CGSize,
-        background: UIColor
+        foreground: UIColor
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-
-        let foreground: UIColor = background.isDark ? .white : .black
         let isSingleLine = !trimmed.contains("\n") && originalRect.height < imageSize.height * 0.06
 
         let horizontalInset = max(1, min(3, originalRect.height * 0.07))
@@ -666,6 +670,148 @@ final class OverlayRenderer {
         // 宽度估算与 OCR 高度互相校正，避免极短词导致估算失真。
         let heightReference = originalRect.height * 1.18
         return max(low, heightReference)
+    }
+
+    private func estimatedForegroundColor(
+        in image: UIImage,
+        textRect: CGRect,
+        background: UIColor
+    ) -> UIColor? {
+        guard
+            let cg = image.cgImage,
+            let bg = background.rgbaComponents
+        else { return nil }
+
+        let imageBounds = CGRect(
+            x: 0,
+            y: 0,
+            width: image.size.width,
+            height: image.size.height
+        )
+
+        // 稍微收一点边，尽量只取文字笔画，避免把卡片边缘/图标采进来。
+        let insetX = max(0.5, min(2.0, textRect.height * 0.05))
+        let insetY = max(0.25, min(1.2, textRect.height * 0.03))
+        let sampleRect = textRect
+            .insetBy(dx: insetX, dy: insetY)
+            .intersection(imageBounds)
+
+        guard sampleRect.width >= 2, sampleRect.height >= 2 else { return nil }
+
+        let sx = CGFloat(cg.width) / image.size.width
+        let sy = CGFloat(cg.height) / image.size.height
+        let pixelRect = CGRect(
+            x: sampleRect.minX * sx,
+            y: (image.size.height - sampleRect.maxY) * sy,
+            width: sampleRect.width * sx,
+            height: sampleRect.height * sy
+        ).integral
+
+        guard pixelRect.width >= 2, pixelRect.height >= 2 else { return nil }
+
+        let input = CIImage(cgImage: cg).cropped(to: pixelRect)
+        let translated = input.transformed(
+            by: CGAffineTransform(
+                translationX: -pixelRect.minX,
+                y: -pixelRect.minY
+            )
+        )
+
+        // 每个文字框只采样一个很小的缩略图，成本低，但足够区分
+        // 主文字白色 / 次级灰色 / 深色文字 / 彩色文字。
+        let sampleWidth = 28
+        let aspect = max(0.15, pixelRect.height / pixelRect.width)
+        let sampleHeight = max(6, min(18, Int(CGFloat(sampleWidth) * aspect)))
+        let scaled = translated.transformed(
+            by: CGAffineTransform(
+                scaleX: CGFloat(sampleWidth) / pixelRect.width,
+                y: CGFloat(sampleHeight) / pixelRect.height
+            )
+        )
+
+        var bitmap = [UInt8](
+            repeating: 0,
+            count: sampleWidth * sampleHeight * 4
+        )
+
+        ciContext.render(
+            scaled,
+            toBitmap: &bitmap,
+            rowBytes: sampleWidth * 4,
+            bounds: CGRect(
+                x: 0,
+                y: 0,
+                width: sampleWidth,
+                height: sampleHeight
+            ),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+
+        struct Candidate {
+            let r: CGFloat
+            let g: CGFloat
+            let b: CGFloat
+            let distance: CGFloat
+        }
+
+        var candidates: [Candidate] = []
+        candidates.reserveCapacity(sampleWidth * sampleHeight)
+
+        for index in stride(from: 0, to: bitmap.count, by: 4) {
+            let r = CGFloat(bitmap[index]) / 255
+            let g = CGFloat(bitmap[index + 1]) / 255
+            let b = CGFloat(bitmap[index + 2]) / 255
+            let a = CGFloat(bitmap[index + 3]) / 255
+
+            guard a > 0.7 else { continue }
+
+            let dr = r - bg.0
+            let dg = g - bg.1
+            let db = b - bg.2
+            let distance = sqrt(dr * dr + dg * dg + db * db)
+
+            // 背景和抗锯齿边缘不参与；只保留明显不同于背景的像素。
+            guard distance > 0.075 else { continue }
+
+            candidates.append(
+                Candidate(r: r, g: g, b: b, distance: distance)
+            )
+        }
+
+        guard candidates.count >= 3 else { return nil }
+
+        // 取距离背景最远的一小批像素，能更接近原始字色，
+        // 而不是被抗锯齿混合后的中间灰拖偏。
+        candidates.sort { $0.distance > $1.distance }
+        let keepCount = max(
+            3,
+            min(candidates.count, Int(ceil(CGFloat(candidates.count) * 0.22)))
+        )
+        let selected = Array(candidates.prefix(keepCount))
+
+        let totalWeight = selected.reduce(CGFloat.zero) {
+            $0 + max(0.001, $1.distance * $1.distance)
+        }
+
+        guard totalWeight > 0 else { return nil }
+
+        let r = selected.reduce(CGFloat.zero) {
+            $0 + $1.r * max(0.001, $1.distance * $1.distance)
+        } / totalWeight
+        let g = selected.reduce(CGFloat.zero) {
+            $0 + $1.g * max(0.001, $1.distance * $1.distance)
+        } / totalWeight
+        let b = selected.reduce(CGFloat.zero) {
+            $0 + $1.b * max(0.001, $1.distance * $1.distance)
+        } / totalWeight
+
+        let color = UIColor(red: r, green: g, blue: b, alpha: 1)
+
+        // 如果最终采样色和背景仍过于接近，宁可回退到黑/白，
+        // 避免译文因为低对比度几乎看不见。
+        guard color.distance(to: background) > 0.10 else { return nil }
+        return color
     }
 
     private func averageColor(in image: UIImage, rect: CGRect) -> UIColor? {
