@@ -250,7 +250,7 @@ struct SettingsView: View {
             }
 
             Section("快捷指令") {
-                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」③ 快速查看。绑定到轻点背面、Action Button 或控制中心即可。")
+                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」。翻译完成后 App 会自动弹出自定义预览，关闭按钮在底部，不再需要“快速查看”。")
                     .font(.footnote)
             }
 
