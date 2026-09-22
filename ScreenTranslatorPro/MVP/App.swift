@@ -110,8 +110,6 @@ struct SettingsView: View {
 
     @State private var baiduAppID = ""
     @State private var baiduSecret = ""
-    @State private var baiduCloudAPIKey = ""
-    @State private var baiduCloudSecretKey = ""
     @State private var deepLKey = ""
     @State private var openAIKey = ""
     @State private var openAIEndpoint = "https://api.openai.com/v1/chat/completions"
@@ -155,13 +153,12 @@ struct SettingsView: View {
                         .font(.footnote)
                 }
 
-            case .baiduImageCloud:
-                Section("百度图片翻译（整图实景回填）") {
-                    SecureField("百度智能云 API Key", text: $baiduCloudAPIKey)
+            case .baiduImageOpen:
+                Section("百度图片翻译") {
+                    TextField("APP ID", text: $baiduAppID)
                         .textInputAutocapitalization(.never)
-                    SecureField("百度智能云 Secret Key", text: $baiduCloudSecretKey)
-                        .textInputAutocapitalization(.never)
-                    Text("使用百度智能云图片翻译接口，paste=1 直接返回整张实景回填图。此模式不经过本地 OCR/矩形覆盖。")
+                    SecureField("Key", text: $baiduSecret)
+                    Text("与百度翻译开放平台里的 APP ID + 密钥一致。使用图片翻译接口直接返回整张实景回填图，不经过本地 OCR 矩形覆盖。")
                         .font(.footnote)
                 }
 
@@ -202,8 +199,6 @@ struct SettingsView: View {
     private func load() {
         baiduAppID = AppConfiguration.baiduAppID
         baiduSecret = SecretStore.shared.read(.baiduSecret) ?? ""
-        baiduCloudAPIKey = SecretStore.shared.read(.baiduCloudAPIKey) ?? ""
-        baiduCloudSecretKey = SecretStore.shared.read(.baiduCloudSecretKey) ?? ""
         deepLKey = SecretStore.shared.read(.deepLKey) ?? ""
         openAIKey = SecretStore.shared.read(.openAIKey) ?? ""
         openAIEndpoint = AppConfiguration.openAIEndpoint
@@ -217,8 +212,6 @@ struct SettingsView: View {
 
         do {
             try SecretStore.shared.write(baiduSecret, for: .baiduSecret)
-            try SecretStore.shared.write(baiduCloudAPIKey, for: .baiduCloudAPIKey)
-            try SecretStore.shared.write(baiduCloudSecretKey, for: .baiduCloudSecretKey)
             try SecretStore.shared.write(deepLKey, for: .deepLKey)
             try SecretStore.shared.write(openAIKey, for: .openAIKey)
             saveMessage = "已保存"
