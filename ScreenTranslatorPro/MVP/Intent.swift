@@ -10,12 +10,8 @@ struct TranslateScreenshotIntent: AppIntent {
     @Parameter(title: "截图")
     var screenshot: IntentFile
 
-    static var parameterSummary: some ParameterSummary {
-        Summary("翻译 \(.$screenshot)")
-    }
-
     func perform() async throws -> some IntentResult & ReturnsValue<IntentFile> {
-        let data = try await screenshot.data(contentType: .image)
+        let data = screenshot.data
         guard let image = UIImage(data: data) else { throw ScreenTranslatorError.invalidImage }
 
         let result = try await ScreenTranslationEngine().process(image: image)
