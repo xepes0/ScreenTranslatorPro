@@ -178,78 +178,432 @@ private extension CGImagePropertyOrientation {
 final class OverlayRenderer {
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
+    private struct BackgroundEstimate {
+        let center: UIColor
+        let top: UIColor
+        let bottom: UIColor
+        let left: UIColor
+        let right: UIColor
+        let spread: CGFloat
+    }
+
     func render(original: UIImage, items: [OCRResult]) -> UIImage {
+        let drawable = items.compactMap { item -> (OCRResult, CGRect)? in
+            let rect = imageRect(from: item.boundingBox, imageSize: original.size)
+            guard rect.width > 3, rect.height > 3 else { return nil }
+            guard shouldRender(item, rect: rect, imageSize: original.size) else { return nil }
+            return (item, rect)
+        }
+
         let format = UIGraphicsImageRendererFormat()
         format.scale = original.scale
         format.opaque = true
-        return UIGraphicsImageRenderer(size: original.size, format: format).image { context in
-            original.draw(in: CGRect(origin: .zero, size: original.size))
-            for item in items where !item.translation.isEmpty {
-                let rect = CGRect(
-                    x: item.boundingBox.minX * original.size.width,
-                    y: (1 - item.boundingBox.maxY) * original.size.height,
-                    width: item.boundingBox.width * original.size.width,
-                    height: item.boundingBox.height * original.size.height
-                )
-                guard rect.width > 4, rect.height > 4 else { continue }
-                let expanded = rect.insetBy(dx: -2, dy: -1)
-                let bg = averageColor(in: original, rect: expanded) ?? .systemBackground
-                let fg: UIColor = bg.isDark ? .white : .black
-                context.cgContext.setFillColor(bg.withAlphaComponent(0.94).cgColor)
-                context.cgContext.addPath(UIBezierPath(roundedRect: expanded, cornerRadius: max(2, expanded.height * 0.08)).cgPath)
-                context.cgContext.fillPath()
 
-                let font = fittingFont(item.translation, rect)
-                let paragraph = NSMutableParagraphStyle()
-                paragraph.alignment = .center
-                paragraph.lineBreakMode = .byWordWrapping
-                let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg, .paragraphStyle: paragraph]
-                let string = NSAttributedString(string: item.translation, attributes: attrs)
-                let measured = string.boundingRect(with: rect.size, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-                let drawRect = CGRect(x: rect.minX, y: rect.midY - min(rect.height, measured.height)/2, width: rect.width, height: min(rect.height, measured.height))
-                string.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+        return UIGraphicsImageRenderer(size: original.size, format: format).image { rendererContext in
+            original.draw(in: CGRect(origin: .zero, size: original.size))
+
+            for (item, rect) in drawable {
+                let eraseRect = expandedEraseRect(
+                    for: rect,
+                    imageSize: original.size
+                )
+
+                let estimate = backgroundEstimate(
+                    in: original,
+                    around: rect,
+                    eraseRect: eraseRect
+                )
+
+                eraseBackground(
+                    in: rendererContext.cgContext,
+                    rect: eraseRect,
+                    estimate: estimate
+                )
+
+                drawTranslation(
+                    item.translation,
+                    originalText: item.text,
+                    in: rect,
+                    eraseRect: eraseRect,
+                    imageSize: original.size,
+                    background: estimate.center
+                )
             }
         }
     }
 
-    private func fittingFont(_ text: String, _ rect: CGRect) -> UIFont {
-        var low: CGFloat = 7, high: CGFloat = max(9, rect.height * 1.25)
-        while high - low > 0.5 {
-            let mid = (low + high) / 2
-            let font = UIFont.systemFont(ofSize: mid, weight: .medium)
-            let bounds = (text as NSString).boundingRect(
-                with: rect.size, options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [.font: font], context: nil
-            )
-            if bounds.width <= rect.width && bounds.height <= rect.height { low = mid } else { high = mid }
+    private func shouldRender(
+        _ item: OCRResult,
+        rect: CGRect,
+        imageSize: CGSize
+    ) -> Bool {
+        let translated = item.translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !translated.isEmpty else { return false }
+
+        if AppConfiguration.provider != .localOCR,
+           normalized(source) == normalized(translated) {
+            return false
         }
-        return .systemFont(ofSize: low, weight: .medium)
+
+        // 状态栏里的时间、电量百分比等无需覆盖，避免出现灰色小块。
+        let tinyThreshold = max(7, imageSize.height * 0.012)
+        if rect.height < tinyThreshold,
+           source.count <= 6,
+           !containsLetterLikeCharacter(source) {
+            return false
+        }
+
+        return true
+    }
+
+    private func normalized(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .replacingOccurrences(of: " ", with: "")
+    }
+
+    private func containsLetterLikeCharacter(_ value: String) -> Bool {
+        value.unicodeScalars.contains { scalar in
+            CharacterSet.letters.contains(scalar)
+        }
+    }
+
+    private func imageRect(from visionRect: CGRect, imageSize: CGSize) -> CGRect {
+        CGRect(
+            x: visionRect.minX * imageSize.width,
+            y: (1 - visionRect.maxY) * imageSize.height,
+            width: visionRect.width * imageSize.width,
+            height: visionRect.height * imageSize.height
+        )
+    }
+
+    private func expandedEraseRect(
+        for rect: CGRect,
+        imageSize: CGSize
+    ) -> CGRect {
+        // 横向稍多扩一点以彻底盖住抗锯齿边缘；纵向扩张更克制，
+        // 避免覆盖卡片分割线、按钮边缘和邻近文字。
+        let xPad = min(12, max(2.5, rect.height * 0.22))
+        let yPad = min(6, max(1.5, rect.height * 0.10))
+
+        return rect
+            .insetBy(dx: -xPad, dy: -yPad)
+            .intersection(CGRect(origin: .zero, size: imageSize))
+    }
+
+    private func backgroundEstimate(
+        in image: UIImage,
+        around textRect: CGRect,
+        eraseRect: CGRect
+    ) -> BackgroundEstimate {
+        let band = min(8, max(2, textRect.height * 0.20))
+        let sideBand = min(8, max(2, textRect.height * 0.18))
+
+        let topRect = CGRect(
+            x: eraseRect.minX,
+            y: eraseRect.minY - band,
+            width: eraseRect.width,
+            height: band
+        )
+        let bottomRect = CGRect(
+            x: eraseRect.minX,
+            y: eraseRect.maxY,
+            width: eraseRect.width,
+            height: band
+        )
+        let leftRect = CGRect(
+            x: eraseRect.minX - sideBand,
+            y: eraseRect.minY,
+            width: sideBand,
+            height: eraseRect.height
+        )
+        let rightRect = CGRect(
+            x: eraseRect.maxX,
+            y: eraseRect.minY,
+            width: sideBand,
+            height: eraseRect.height
+        )
+
+        let fallback = averageColor(in: image, rect: eraseRect) ?? .systemBackground
+        let top = averageColor(in: image, rect: topRect) ?? fallback
+        let bottom = averageColor(in: image, rect: bottomRect) ?? fallback
+        let left = averageColor(in: image, rect: leftRect) ?? fallback
+        let right = averageColor(in: image, rect: rightRect) ?? fallback
+
+        let colors = [top, bottom, left, right]
+        let center = UIColor.median(of: colors) ?? fallback
+        let spread = colors
+            .map { $0.distance(to: center) }
+            .reduce(0, +) / CGFloat(colors.count)
+
+        return BackgroundEstimate(
+            center: center,
+            top: top,
+            bottom: bottom,
+            left: left,
+            right: right,
+            spread: spread
+        )
+    }
+
+    private func eraseBackground(
+        in context: CGContext,
+        rect: CGRect,
+        estimate: BackgroundEstimate
+    ) {
+        context.saveGState()
+        defer { context.restoreGState() }
+
+        let radius = min(5, max(1.5, rect.height * 0.08))
+        let path = UIBezierPath(roundedRect: rect, cornerRadius: radius)
+        context.addPath(path.cgPath)
+        context.clip()
+
+        let verticalDistance = estimate.top.distance(to: estimate.bottom)
+        let horizontalDistance = estimate.left.distance(to: estimate.right)
+
+        if estimate.spread < 0.055 {
+            context.setFillColor(estimate.center.cgColor)
+            context.fill(rect)
+            return
+        }
+
+        let startColor: UIColor
+        let endColor: UIColor
+        let startPoint: CGPoint
+        let endPoint: CGPoint
+
+        if verticalDistance >= horizontalDistance {
+            startColor = estimate.top
+            endColor = estimate.bottom
+            startPoint = CGPoint(x: rect.midX, y: rect.minY)
+            endPoint = CGPoint(x: rect.midX, y: rect.maxY)
+        } else {
+            startColor = estimate.left
+            endColor = estimate.right
+            startPoint = CGPoint(x: rect.minX, y: rect.midY)
+            endPoint = CGPoint(x: rect.maxX, y: rect.midY)
+        }
+
+        let colors = [startColor.cgColor, endColor.cgColor] as CFArray
+        if let gradient = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: colors,
+            locations: [0, 1]
+        ) {
+            context.drawLinearGradient(
+                gradient,
+                start: startPoint,
+                end: endPoint,
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+        } else {
+            context.setFillColor(estimate.center.cgColor)
+            context.fill(rect)
+        }
+    }
+
+    private func drawTranslation(
+        _ text: String,
+        originalText: String,
+        in originalRect: CGRect,
+        eraseRect: CGRect,
+        imageSize: CGSize,
+        background: UIColor
+    ) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let foreground: UIColor = background.isDark ? .white : .black
+
+        // beta13 暂时保守沿用原 OCR 框高度；beta14 再专门做字号/字重匹配。
+        let drawRect = CGRect(
+            x: eraseRect.minX + 1.5,
+            y: eraseRect.minY + 0.5,
+            width: max(1, eraseRect.width - 3),
+            height: max(1, eraseRect.height - 1)
+        )
+
+        let font = fittingFont(
+            trimmed,
+            originalText: originalText,
+            rect: drawRect,
+            imageSize: imageSize
+        )
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .left
+        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.minimumLineHeight = font.lineHeight * 0.92
+        paragraph.maximumLineHeight = font.lineHeight * 1.05
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: foreground,
+            .paragraphStyle: paragraph
+        ]
+
+        let string = NSAttributedString(string: trimmed, attributes: attributes)
+        let measured = string.boundingRect(
+            with: drawRect.size,
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        )
+
+        let y = drawRect.midY - min(drawRect.height, measured.height) / 2
+        let finalRect = CGRect(
+            x: drawRect.minX,
+            y: y,
+            width: drawRect.width,
+            height: min(drawRect.height, measured.height)
+        )
+
+        string.draw(
+            with: finalRect,
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        )
+    }
+
+    private func fittingFont(
+        _ text: String,
+        originalText: String,
+        rect: CGRect,
+        imageSize: CGSize
+    ) -> UIFont {
+        var low: CGFloat = 7
+        var high = max(9, rect.height * 1.12)
+
+        // 大标题先保留稍高上限，避免标题翻译后明显缩小。
+        if rect.height > imageSize.height * 0.035 {
+            high = max(high, rect.height * 1.22)
+        }
+
+        let weight: UIFont.Weight = rect.height > imageSize.height * 0.03
+            ? .semibold
+            : .regular
+
+        while high - low > 0.35 {
+            let mid = (low + high) / 2
+            let font = UIFont.systemFont(ofSize: mid, weight: weight)
+            let bounds = (text as NSString).boundingRect(
+                with: rect.size,
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font],
+                context: nil
+            )
+
+            if bounds.width <= rect.width && bounds.height <= rect.height {
+                low = mid
+            } else {
+                high = mid
+            }
+        }
+
+        return .systemFont(ofSize: low, weight: weight)
     }
 
     private func averageColor(in image: UIImage, rect: CGRect) -> UIColor? {
         guard let cg = image.cgImage else { return nil }
+
+        let imageBounds = CGRect(
+            x: 0,
+            y: 0,
+            width: image.size.width,
+            height: image.size.height
+        )
+        let clipped = rect.intersection(imageBounds)
+        guard !clipped.isNull, clipped.width >= 1, clipped.height >= 1 else {
+            return nil
+        }
+
         let sx = CGFloat(cg.width) / image.size.width
         let sy = CGFloat(cg.height) / image.size.height
-        let bounds = CGRect(x: 0, y: 0, width: cg.width, height: cg.height)
-        let crop = CGRect(x: rect.minX*sx, y: (image.size.height-rect.maxY)*sy, width: rect.width*sx, height: rect.height*sy)
-            .intersection(bounds).integral
-        guard !crop.isNull, crop.width >= 1, crop.height >= 1 else { return nil }
-        let input = CIImage(cgImage: cg).cropped(to: crop)
+
+        let pixelRect = CGRect(
+            x: clipped.minX * sx,
+            y: (image.size.height - clipped.maxY) * sy,
+            width: clipped.width * sx,
+            height: clipped.height * sy
+        ).integral
+
+        guard pixelRect.width >= 1, pixelRect.height >= 1 else { return nil }
+
+        let input = CIImage(cgImage: cg).cropped(to: pixelRect)
         guard let filter = CIFilter(name: "CIAreaAverage") else { return nil }
+
         filter.setValue(input, forKey: kCIInputImageKey)
         filter.setValue(CIVector(cgRect: input.extent), forKey: kCIInputExtentKey)
+
         guard let output = filter.outputImage else { return nil }
+
         var rgba = [UInt8](repeating: 0, count: 4)
-        ciContext.render(output, toBitmap: &rgba, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
-        return UIColor(red: CGFloat(rgba[0])/255, green: CGFloat(rgba[1])/255, blue: CGFloat(rgba[2])/255, alpha: 1)
+        ciContext.render(
+            output,
+            toBitmap: &rgba,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+
+        return UIColor(
+            red: CGFloat(rgba[0]) / 255,
+            green: CGFloat(rgba[1]) / 255,
+            blue: CGFloat(rgba[2]) / 255,
+            alpha: 1
+        )
     }
 }
 
 private extension UIColor {
+    var rgbaComponents: (CGFloat, CGFloat, CGFloat, CGFloat)? {
+        var r: CGFloat = 0
+        var g: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
+        guard getRed(&r, green: &g, blue: &b, alpha: &a) else { return nil }
+        return (r, g, b, a)
+    }
+
     var isDark: Bool {
-        var r: CGFloat=0, g: CGFloat=0, b: CGFloat=0, a: CGFloat=0
-        guard getRed(&r, green:&g, blue:&b, alpha:&a) else { return false }
-        return (0.2126*r + 0.7152*g + 0.0722*b) < 0.52
+        guard let (r, g, b, _) = rgbaComponents else { return false }
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 0.52
+    }
+
+    func distance(to other: UIColor) -> CGFloat {
+        guard
+            let (r1, g1, b1, _) = rgbaComponents,
+            let (r2, g2, b2, _) = other.rgbaComponents
+        else { return 0 }
+
+        let dr = r1 - r2
+        let dg = g1 - g2
+        let db = b1 - b2
+        return sqrt(dr * dr + dg * dg + db * db)
+    }
+
+    static func median(of colors: [UIColor]) -> UIColor? {
+        let values = colors.compactMap(\.rgbaComponents)
+        guard !values.isEmpty else { return nil }
+
+        func median(_ values: [CGFloat]) -> CGFloat {
+            let sorted = values.sorted()
+            let middle = sorted.count / 2
+            if sorted.count.isMultiple(of: 2) {
+                return (sorted[middle - 1] + sorted[middle]) / 2
+            }
+            return sorted[middle]
+        }
+
+        return UIColor(
+            red: median(values.map { $0.0 }),
+            green: median(values.map { $0.1 }),
+            blue: median(values.map { $0.2 }),
+            alpha: median(values.map { $0.3 })
+        )
     }
 }
 
