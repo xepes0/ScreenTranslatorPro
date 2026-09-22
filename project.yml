@@ -2,12 +2,12 @@ name: ScreenTranslatorPro
 options:
   bundleIdPrefix: com.xepes
   deploymentTarget:
-    iOS: "26.0"
+    iOS: "18.0"
 settings:
   base:
     SWIFT_VERSION: "5.10"
     MARKETING_VERSION: "0.2.0"
-    CURRENT_PROJECT_VERSION: "11"
+    CURRENT_PROJECT_VERSION: "12"
 targets:
   ScreenTranslatorPro:
     type: application
