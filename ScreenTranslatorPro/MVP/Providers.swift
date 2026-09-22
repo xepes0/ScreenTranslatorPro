@@ -130,8 +130,12 @@ struct BaiduOpenPlatformImageTranslator: Sendable {
     let secret: String
 
     func translate(image: UIImage, source: String, target: String) async throws -> UIImage {
-        guard !appID.isEmpty else { throw ScreenTranslatorError.missingCredential("百度 APP ID") }
-        guard !secret.isEmpty else { throw ScreenTranslatorError.missingCredential("百度 Key") }
+        guard !appID.isEmpty else {
+            throw ScreenTranslatorError.missingCredential("百度 APP ID")
+        }
+        guard !secret.isEmpty else {
+            throw ScreenTranslatorError.missingCredential("百度 Key")
+        }
 
         let imageData = try Self.preparedJPEG(from: image)
         let salt = String(UInt64.random(in: 100000...999999999))
@@ -150,8 +154,7 @@ struct BaiduOpenPlatformImageTranslator: Sendable {
             URLQueryItem(name: "sign", value: sign),
             URLQueryItem(name: "cuid", value: cuid),
             URLQueryItem(name: "mac", value: mac),
-            URLQueryItem(name: "version", value: "3"),
-            URLQueryItem(name: "paste", value: "1")
+            URLQueryItem(name: "version", value: "3")
         ]
 
         guard let url = components.url else {
@@ -162,7 +165,10 @@ struct BaiduOpenPlatformImageTranslator: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.setValue(
+            "multipart/form-data; boundary=\(boundary)",
+            forHTTPHeaderField: "Content-Type"
+        )
 
         var body = Data()
         body.appendUTF8("--\(boundary)\r\n")
@@ -173,8 +179,13 @@ struct BaiduOpenPlatformImageTranslator: Sendable {
         request.httpBody = body
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw ScreenTranslatorError.invalidResponse("百度图片翻译 HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+        guard
+            let http = response as? HTTPURLResponse,
+            (200..<300).contains(http.statusCode)
+        else {
+            throw ScreenTranslatorError.invalidResponse(
+                "百度图片翻译 HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+            )
         }
 
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -184,52 +195,116 @@ struct BaiduOpenPlatformImageTranslator: Sendable {
         let errorCode = String(describing: root["error_code"] ?? "0")
         if errorCode != "0" {
             let message = String(describing: root["error_msg"] ?? "unknown")
-            throw ScreenTranslatorError.invalidResponse("百度图片翻译错误 \(errorCode)：\(message)")
+            throw ScreenTranslatorError.invalidResponse(
+                "百度图片翻译错误 \(errorCode)：\(message)"
+            )
         }
 
-        // V1 成功响应的主要结构是 root["data"]["pasteImg"]。
-        // 同时兼容少数历史返回把 pasteImg 放在根节点或 content 中。
-        let payload = root["data"] as? [String: Any]
-        var pasteBase64 = payload?["pasteImg"] as? String
+        // V1 官方响应：content / sumSrc / sumDst / pasteImg 都位于根节点。
+        let content = root["content"] as? [[String: Any]] ?? []
+        let sumSrc = (root["sumSrc"] as? String) ?? ""
+        let sumDst = (root["sumDst"] as? String) ?? ""
 
-        if pasteBase64 == nil {
-            pasteBase64 = root["pasteImg"] as? String
+        let hasChangedContent = content.contains { item in
+            let src = ((item["src"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let dst = ((item["dst"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return !dst.isEmpty && dst != src
         }
 
-        let content =
-            (payload?["content"] as? [[String: Any]]) ??
-            (root["content"] as? [[String: Any]]) ??
-            []
+        let hasChangedSummary =
+            !sumDst.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            sumDst.trimmingCharacters(in: .whitespacesAndNewlines) !=
+            sumSrc.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let didTranslate = hasChangedContent || hasChangedSummary
+
+        var pasteBase64 = root["pasteImg"] as? String
         if pasteBase64 == nil {
             pasteBase64 = content
                 .compactMap { $0["pasteImg"] as? String }
                 .first(where: { !$0.isEmpty })
         }
 
-        if let pasteBase64,
-           let pasteData = Data(base64Encoded: pasteBase64, options: .ignoreUnknownCharacters),
+        if didTranslate,
+           let pasteBase64,
+           let pasteData = Self.decodeBase64Image(pasteBase64),
            let output = UIImage(data: pasteData) {
             return output
         }
 
-        // 有些账号/场景即使翻译成功也可能不返回整图贴合。
-        // 此时使用百度返回的 dst + rect 在本机原位回填，避免整个快捷指令失败。
+        // 百度有译文但没返回可用贴合图时，直接用它的 dst + rect 本机回填。
         let fallbackItems = Self.fallbackItems(from: content, imageSize: image.size)
-        if !fallbackItems.isEmpty {
-            return OverlayRenderer().render(original: image, items: fallbackItems)
+        if didTranslate && !fallbackItems.isEmpty {
+            return OverlayRenderer().render(
+                original: image,
+                items: fallbackItems
+            )
         }
 
-        let translatedText =
-            (payload?["sumDst"] as? String) ??
-            (root["sumDst"] as? String) ??
-            ""
-        if !translatedText.isEmpty {
-            throw ScreenTranslatorError.invalidResponse("百度翻译成功但未返回贴合图/坐标；译文：\(translatedText.prefix(120))")
+        // 最后一层兜底：本机 Vision OCR + 同一 APP ID/Key 的百度文本翻译。
+        // 这样即使图片接口没有生成贴合图，仍然能得到可见译文。
+        do {
+            return try await localOCRTextFallback(
+                image: image,
+                source: source,
+                target: target
+            )
+        } catch {
+            let keys = Array(root.keys).sorted().joined(separator: ",")
+            throw ScreenTranslatorError.invalidResponse(
+                "图片接口未产生有效译文；from=\(root["from"] ?? "?") to=\(root["to"] ?? "?") keys=\(keys)；文本兜底也失败：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func localOCRTextFallback(
+        image: UIImage,
+        source: String,
+        target: String
+    ) async throws -> UIImage {
+        let ocrItems = try await VisionOCRManager().recognize(
+            image: image,
+            sourceLanguage: source
+        )
+        guard !ocrItems.isEmpty else {
+            throw ScreenTranslatorError.noTextFound
         }
 
-        let keys = payload.map { Array($0.keys).sorted().joined(separator: ",") } ?? "nil"
-        throw ScreenTranslatorError.invalidResponse("百度成功响应未包含 pasteImg；data keys=\(keys)")
+        let translator = BaiduTextTranslator(appID: appID, secret: secret)
+        var translated: [OCRResult] = []
+        translated.reserveCapacity(ocrItems.count)
+
+        for (index, item) in ocrItems.enumerated() {
+            var copy = item
+            copy.translation = try await translator.translate(
+                text: item.text,
+                source: source,
+                target: target
+            )
+            translated.append(copy)
+
+            if index < ocrItems.count - 1 {
+                try await Task.sleep(for: .milliseconds(1050))
+            }
+        }
+
+        return OverlayRenderer().render(
+            original: image,
+            items: translated
+        )
+    }
+
+    private static func decodeBase64Image(_ value: String) -> Data? {
+        let raw: String
+        if let comma = value.firstIndex(of: ","),
+           value[..<comma].contains("base64") {
+            raw = String(value[value.index(after: comma)...])
+        } else {
+            raw = value
+        }
+        return Data(base64Encoded: raw, options: .ignoreUnknownCharacters)
     }
 
     private static func fallbackItems(
@@ -258,7 +333,6 @@ struct BaiduOpenPlatformImageTranslator: Sendable {
 
             guard width > 0, height > 0 else { return nil }
 
-            // 百度 rect 以左上角为原点；Vision boundingBox 以左下角为原点、0...1 归一化。
             let visionRect = CGRect(
                 x: left / imageSize.width,
                 y: 1 - ((top + height) / imageSize.height),
@@ -299,15 +373,21 @@ struct BaiduOpenPlatformImageTranslator: Sendable {
         }
 
         for quality in stride(from: 0.92, through: 0.45, by: -0.08) {
-            if let data = current.jpegData(compressionQuality: quality), data.count < 3_900_000 {
+            if let data = current.jpegData(compressionQuality: quality),
+               data.count < 3_900_000 {
                 return data
             }
         }
 
-        throw ScreenTranslatorError.invalidResponse("图片压缩后仍超过百度 4MB 限制")
+        throw ScreenTranslatorError.invalidResponse(
+            "图片压缩后仍超过百度 4MB 限制"
+        )
     }
 
-    private static func baiduLanguage(_ code: String, allowAuto: Bool) -> String {
+    private static func baiduLanguage(
+        _ code: String,
+        allowAuto: Bool
+    ) -> String {
         let lower = code.lowercased()
         if allowAuto && lower == "auto" { return "auto" }
 
