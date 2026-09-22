@@ -7,21 +7,31 @@ struct TranslateScreenshotIntent: AppIntent {
     static var description = IntentDescription("接收截图，OCR 后翻译，并把译文绘制回原文字位置。")
     static var openAppWhenRun: Bool = false
 
-    @Parameter(title: "截图")
+    @Parameter(
+        title: "截图",
+        supportedContentTypes: [.image],
+        inputConnectionBehavior: .connectToPreviousIntentResult
+    )
     var screenshot: IntentFile
 
     func perform() async throws -> some IntentResult & ReturnsValue<IntentFile> {
         let data = screenshot.data
-        guard let image = UIImage(data: data) else { throw ScreenTranslatorError.invalidImage }
+        guard let image = UIImage(data: data) else {
+            throw ScreenTranslatorError.invalidImage
+        }
 
         let result = try await ScreenTranslationEngine().process(image: image)
-        guard let png = result.image.pngData() else { throw ScreenTranslatorError.invalidImage }
+        guard let png = result.image.pngData() else {
+            throw ScreenTranslatorError.invalidImage
+        }
 
-        return .result(value: IntentFile(
-            data: png,
-            filename: "ScreenTranslatorPro-Translated.png",
-            type: .png
-        ))
+        return .result(
+            value: IntentFile(
+                data: png,
+                filename: "ScreenTranslatorPro-Translated.png",
+                type: .png
+            )
+        )
     }
 }
 
