@@ -1,0 +1,44 @@
+import AppIntents
+import UniformTypeIdentifiers
+import UIKit
+
+struct TranslateScreenshotIntent: AppIntent {
+    static var title: LocalizedStringResource = "翻译截图"
+    static var description = IntentDescription("接收截图，OCR 后翻译，并把译文绘制回原文字位置。")
+    static var openAppWhenRun: Bool = false
+
+    @Parameter(title: "截图")
+    var screenshot: IntentFile
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("翻译 \(.$screenshot)")
+    }
+
+    func perform() async throws -> some IntentResult & ReturnsValue<IntentFile> {
+        let data = try await screenshot.data(contentType: .image)
+        guard let image = UIImage(data: data) else { throw ScreenTranslatorError.invalidImage }
+
+        let result = try await ScreenTranslationEngine().process(image: image)
+        guard let png = result.image.pngData() else { throw ScreenTranslatorError.invalidImage }
+
+        return .result(value: IntentFile(
+            data: png,
+            filename: "ScreenTranslatorPro-Translated.png",
+            type: .png
+        ))
+    }
+}
+
+struct ScreenTranslatorAppShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(
+            intent: TranslateScreenshotIntent(),
+            phrases: [
+                "Translate screen with \(.applicationName)",
+                "Translate screenshot with \(.applicationName)"
+            ],
+            shortTitle: "翻译截图",
+            systemImageName: "character.bubble"
+        )
+    }
+}
