@@ -4,6 +4,8 @@ import UIKit
 import ImageIO
 import CoreImage
 import Security
+import ObjectiveC.runtime
+import Darwin
 
 struct OCRResult: Identifiable, Sendable {
     let id: UUID
@@ -322,5 +324,97 @@ enum PreviewStore {
     static func clear() {
         UserDefaults.standard.set(false, forKey: pendingKey)
         try? FileManager.default.removeItem(at: fileURL)
+    }
+}
+
+
+enum ReturnTargetStore {
+    private static let bundleIDKey = "ScreenTranslatorPro.returnTargetBundleID"
+
+    static func captureFrontmostApplication() {
+        guard
+            let bundleID = PrivateApplicationBridge.frontmostBundleIdentifier(),
+            !bundleID.isEmpty,
+            bundleID != Bundle.main.bundleIdentifier,
+            bundleID != "com.apple.springboard"
+        else { return }
+
+        UserDefaults.standard.set(bundleID, forKey: bundleIDKey)
+    }
+
+    @discardableResult
+    static func openCapturedApplication() -> Bool {
+        guard
+            let bundleID = UserDefaults.standard.string(forKey: bundleIDKey),
+            !bundleID.isEmpty,
+            bundleID != Bundle.main.bundleIdentifier
+        else { return false }
+
+        return PrivateApplicationBridge.openApplication(bundleIdentifier: bundleID)
+    }
+
+    static var capturedBundleIdentifier: String? {
+        UserDefaults.standard.string(forKey: bundleIDKey)
+    }
+}
+
+private enum PrivateApplicationBridge {
+    typealias FrontmostFunction = @convention(c) () -> Unmanaged<CFString>?
+
+    static func frontmostBundleIdentifier() -> String? {
+        let frameworkPath = "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices"
+        guard let handle = dlopen(frameworkPath, RTLD_LAZY) else { return nil }
+        defer { dlclose(handle) }
+
+        guard let symbol = dlsym(handle, "SBSCopyFrontmostApplicationDisplayIdentifier") else {
+            return nil
+        }
+
+        let function = unsafeBitCast(symbol, to: FrontmostFunction.self)
+        guard let value = function()?.takeRetainedValue() else { return nil }
+        return value as String
+    }
+
+    static func openApplication(bundleIdentifier: String) -> Bool {
+        guard
+            let workspaceClass: AnyClass = NSClassFromString("LSApplicationWorkspace"),
+            let defaultMethod = class_getClassMethod(
+                workspaceClass,
+                NSSelectorFromString("defaultWorkspace")
+            )
+        else { return false }
+
+        typealias DefaultWorkspaceFunction = @convention(c) (AnyClass, Selector) -> Unmanaged<AnyObject>
+        let defaultImplementation = method_getImplementation(defaultMethod)
+        let defaultWorkspace = unsafeBitCast(
+            defaultImplementation,
+            to: DefaultWorkspaceFunction.self
+        )
+        let defaultSelector = NSSelectorFromString("defaultWorkspace")
+        let workspace = defaultWorkspace(
+            workspaceClass,
+            defaultSelector
+        ).takeUnretainedValue()
+
+        let selectors = [
+            NSSelectorFromString("openApplicationWithBundleID:"),
+            NSSelectorFromString("openApplicationWithBundleIdentifier:")
+        ]
+
+        for selector in selectors {
+            guard
+                let method = class_getInstanceMethod(workspaceClass, selector)
+            else { continue }
+
+            typealias OpenFunction = @convention(c) (AnyObject, Selector, NSString) -> Bool
+            let implementation = method_getImplementation(method)
+            let open = unsafeBitCast(implementation, to: OpenFunction.self)
+
+            if open(workspace, selector, bundleIdentifier as NSString) {
+                return true
+            }
+        }
+
+        return false
     }
 }
