@@ -22,12 +22,13 @@ struct OCRResult: Identifiable, Sendable {
 }
 
 enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
-    case localOCR, baiduText, deepL, openAICompatible
+    case localOCR, baiduText, baiduImageCloud, deepL, openAICompatible
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .localOCR: return "本地 OCR（不翻译）"
         case .baiduText: return "百度通用文本翻译"
+        case .baiduImageCloud: return "百度图片翻译（整图回填）"
         case .deepL: return "DeepL"
         case .openAICompatible: return "OpenAI-Compatible"
         }
@@ -69,7 +70,13 @@ enum AppConfiguration {
     static var openAIModel: String { UserDefaults.standard.string(forKey: openAIModelKey) ?? "gpt-4.1-mini" }
 }
 
-enum SecretKey: String { case baiduSecret, deepLKey, openAIKey }
+enum SecretKey: String {
+    case baiduSecret
+    case baiduCloudAPIKey
+    case baiduCloudSecretKey
+    case deepLKey
+    case openAIKey
+}
 
 final class SecretStore: @unchecked Sendable {
     static let shared = SecretStore()
@@ -253,6 +260,16 @@ final class ScreenTranslationEngine {
     func process(image: UIImage) async throws -> ScreenTranslationResult {
         let source = AppConfiguration.sourceLanguage
         let target = AppConfiguration.targetLanguage
+
+        if AppConfiguration.provider == .baiduImageCloud {
+            let provider = BaiduCloudImageTranslator(
+                apiKey: SecretStore.shared.read(.baiduCloudAPIKey) ?? "",
+                secretKey: SecretStore.shared.read(.baiduCloudSecretKey) ?? ""
+            )
+            let output = try await provider.translate(image: image, source: source, target: target)
+            return ScreenTranslationResult(image: output, items: [])
+        }
+
         let found = try await ocr.recognize(image: image, sourceLanguage: source)
         guard !found.isEmpty else { throw ScreenTranslatorError.noTextFound }
         let translated = try await service.translate(found, source: source, target: target)
