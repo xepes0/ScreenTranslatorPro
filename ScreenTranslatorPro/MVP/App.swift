@@ -138,10 +138,10 @@ struct ContentView: View {
         previewImage = nil
         PreviewStore.clear()
 
-        // 自签测试版使用系统未公开的 suspend selector：
-        // 预览关闭后立即把本 App 放回后台，露出翻译前正在使用的 App。
+        // 直接重新激活触发翻译前的 App。
+        // 如果系统拒绝私有调用，就停留在本 App，不再强制 suspend 到主屏幕。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            _ = UIApplication.shared.perform(NSSelectorFromString("suspend"))
+            _ = ReturnTargetStore.openCapturedApplication()
         }
     }
 }
@@ -297,7 +297,7 @@ struct SettingsView: View {
             }
 
             Section("快捷指令") {
-                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」。翻译完成后显示自定义全屏译图，底部固定“取消 / 完成”；关闭后会回到翻译前的 App。")
+                Text("新建捷径：① 截屏 ② Screen Translator Pro「翻译截图」。翻译先在后台完成，再显示全屏译图；点击“取消 / 完成”会尝试直接重新打开翻译前正在使用的 App。")
                     .font(.footnote)
             }
 
