@@ -45,12 +45,19 @@ private struct TranslationResultSnippet: View {
     var body: some View {
         Group {
             if let image = UIImage(data: imageData) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: 340)
+                GeometryReader { proxy in
+                    ScrollView(.vertical) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: proxy.size.width)
+                    }
+                    .scrollIndicators(.visible)
                     .background(Color.black)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 340)
+                .clipShape(RoundedRectangle(cornerRadius: 18))
             } else {
                 ContentUnavailableView(
                     "无法显示译图",
