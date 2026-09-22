@@ -112,7 +112,7 @@ final class SecretStore: @unchecked Sendable {
 }
 
 final class VisionOCRManager {
-    func recognize(image: UIImage, sourceLanguage: String = "auto") async throws -> [OCRResult] {
+    func recognize(image: UIImage, sourceLanguage: String = "auto", fast: Bool = false) async throws -> [OCRResult] {
         guard let cgImage = image.cgImage else { throw ScreenTranslatorError.invalidImage }
         return try await withCheckedThrowingContinuation { continuation in
             let request = VNRecognizeTextRequest { request, error in
@@ -128,7 +128,7 @@ final class VisionOCRManager {
                 }
                 continuation.resume(returning: values)
             }
-            request.recognitionLevel = .accurate
+            request.recognitionLevel = fast ? .fast : .accurate
             request.usesLanguageCorrection = true
             request.minimumTextHeight = 0.008
             if let lang = Self.visionLanguage(for: sourceLanguage) { request.recognitionLanguages = [lang] }
@@ -271,7 +271,11 @@ final class ScreenTranslationEngine {
             return ScreenTranslationResult(image: output, items: [])
         }
 
-        let found = try await ocr.recognize(image: image, sourceLanguage: source)
+        let found = try await ocr.recognize(
+            image: image,
+            sourceLanguage: source,
+            fast: AppConfiguration.provider == .baiduFast
+        )
         guard !found.isEmpty else { throw ScreenTranslatorError.noTextFound }
         let translated = try await service.translate(found, source: source, target: target)
         return ScreenTranslationResult(image: renderer.render(original: image, items: translated), items: translated)
