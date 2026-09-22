@@ -43,16 +43,16 @@ jobs:
         run: |
           APP_PATH="DerivedData/Build/Products/Release-iphoneos/ScreenTranslatorPro.app"
           test -d "$APP_PATH"
-          rm -rf Payload ScreenTranslatorPro-v0.2.0-beta4-unsigned.ipa
+          rm -rf Payload ScreenTranslatorPro-v0.2.0-beta5-unsigned.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          ditto -c -k --sequesterRsrc --keepParent Payload ScreenTranslatorPro-v0.2.0-beta4-unsigned.ipa
+          ditto -c -k --sequesterRsrc --keepParent Payload ScreenTranslatorPro-v0.2.0-beta5-unsigned.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: ScreenTranslatorPro-v0.2.0-beta4
+          name: ScreenTranslatorPro-v0.2.0-beta5
           path: |
-            ScreenTranslatorPro-v0.2.0-beta4-unsigned.ipa
+            ScreenTranslatorPro-v0.2.0-beta5-unsigned.ipa
             xcodebuild.log
           if-no-files-found: error
