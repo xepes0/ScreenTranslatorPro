@@ -529,47 +529,91 @@ final class OverlayRenderer {
         let isLargeTitle = originalRect.height > imageSize.height * 0.028
         let weight: UIFont.Weight = isLargeTitle ? .semibold : .regular
 
-        // OCR boundingBox 更接近“字形高度”，而 UIFont 的 lineHeight 会明显更高。
-        // 单行 UI 文本直接以 OCR 高度估算字号，再只按宽度收缩，避免字体偏小。
-        var high: CGFloat
-        if singleLine {
-            high = max(
-                9,
-                originalRect.height * (isLargeTitle ? 1.10 : 1.06)
-            )
+        // beta15：先用“原文实际宽度”反推原字体大小，再用同样字号绘制译文。
+        // 这样不会再单纯依赖 OCR 高度而把中文缩得过小。
+        let sourceSize = estimatedSourceFontSize(
+            originalText: originalText,
+            originalRect: originalRect,
+            weight: weight
+        )
+
+        let opticalBoost: CGFloat
+        if isLargeTitle {
+            opticalBoost = 1.06
+        } else if originalRect.height < imageSize.height * 0.018 {
+            // 小标签/副标题适当多放大一点，提升可读性。
+            opticalBoost = 1.10
         } else {
-            high = max(9, originalRect.height * 1.02)
+            opticalBoost = 1.075
         }
 
-        var low = min(8, high)
+        var preferred = sourceSize * opticalBoost
 
-        func fits(_ size: CGFloat) -> Bool {
+        // OCR 偶尔给出偏窄的源文字框；用高度给一个合理下限，
+        // 但不再像旧版那样把字号硬限制在 OCR 高度附近。
+        let heightFloor = originalRect.height * (isLargeTitle ? 1.22 : 1.16)
+        preferred = max(preferred, heightFloor)
+
+        // 防止异常 OCR 框把字号推得过大。
+        let heightCeiling = originalRect.height * (isLargeTitle ? 1.72 : 1.58)
+        preferred = min(preferred, heightCeiling)
+
+        func width(of size: CGFloat) -> CGFloat {
+            let font = UIFont.systemFont(ofSize: size, weight: weight)
+            return (text as NSString).boundingRect(
+                with: CGSize(width: .greatestFiniteMagnitude, height: originalRect.height * 3),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font],
+                context: nil
+            ).width
+        }
+
+        if singleLine {
+            // 有空间就保留接近原文的字号；只有译文真的放不下时才缩。
+            if width(of: preferred) <= availableWidth {
+                return .systemFont(ofSize: preferred, weight: weight)
+            }
+
+            var low = max(7, preferred * 0.55)
+            var high = preferred
+            while high - low > 0.25 {
+                let mid = (low + high) / 2
+                if width(of: mid) <= availableWidth {
+                    low = mid
+                } else {
+                    high = mid
+                }
+            }
+            return .systemFont(ofSize: low, weight: weight)
+        }
+
+        // 多行文字允许更高的排版区域，同时保持接近源字号。
+        var low = max(7, preferred * 0.55)
+        var high = preferred
+
+        func fitsMultiline(_ size: CGFloat) -> Bool {
             let font = UIFont.systemFont(ofSize: size, weight: weight)
             let bounds = (text as NSString).boundingRect(
                 with: CGSize(
                     width: availableWidth,
-                    height: singleLine ? originalRect.height * 2.2 : originalRect.height * 1.45
+                    height: originalRect.height * 1.75
                 ),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [.font: font],
                 context: nil
             )
 
-            if singleLine {
-                return bounds.width <= availableWidth
-            }
-
-            return bounds.width <= availableWidth &&
-                bounds.height <= originalRect.height * 1.45
+            return bounds.width <= availableWidth + 0.5 &&
+                bounds.height <= originalRect.height * 1.75
         }
 
-        if fits(high) {
-            return .systemFont(ofSize: high, weight: weight)
+        if fitsMultiline(preferred) {
+            return .systemFont(ofSize: preferred, weight: weight)
         }
 
-        while high - low > 0.30 {
+        while high - low > 0.25 {
             let mid = (low + high) / 2
-            if fits(mid) {
+            if fitsMultiline(mid) {
                 low = mid
             } else {
                 high = mid
@@ -577,6 +621,51 @@ final class OverlayRenderer {
         }
 
         return .systemFont(ofSize: low, weight: weight)
+    }
+
+    private func estimatedSourceFontSize(
+        originalText: String,
+        originalRect: CGRect,
+        weight: UIFont.Weight
+    ) -> CGFloat {
+        let source = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty, originalRect.width > 2 else {
+            return max(9, originalRect.height * 1.22)
+        }
+
+        let targetWidth = max(2, originalRect.width * 0.985)
+        var low: CGFloat = 5
+        var high = max(18, originalRect.height * 2.4)
+
+        func sourceWidth(_ size: CGFloat) -> CGFloat {
+            let font = UIFont.systemFont(ofSize: size, weight: weight)
+            return (source as NSString).boundingRect(
+                with: CGSize(width: .greatestFiniteMagnitude, height: originalRect.height * 3),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font],
+                context: nil
+            ).width
+        }
+
+        // 如果上限仍比原文字窄，再扩大搜索范围。
+        var guardCount = 0
+        while sourceWidth(high) < targetWidth && guardCount < 4 {
+            high *= 1.35
+            guardCount += 1
+        }
+
+        while high - low > 0.25 {
+            let mid = (low + high) / 2
+            if sourceWidth(mid) <= targetWidth {
+                low = mid
+            } else {
+                high = mid
+            }
+        }
+
+        // 宽度估算与 OCR 高度互相校正，避免极短词导致估算失真。
+        let heightReference = originalRect.height * 1.18
+        return max(low, heightReference)
     }
 
     private func averageColor(in image: UIImage, rect: CGRect) -> UIColor? {
