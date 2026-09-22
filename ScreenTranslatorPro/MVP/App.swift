@@ -8,11 +8,13 @@ struct ScreenTranslatorProApp: App {
 }
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var pickerItem: PhotosPickerItem?
     @State private var originalImage: UIImage?
     @State private var translatedImage: UIImage?
     @State private var isWorking = false
     @State private var errorMessage: String?
+    @State private var previewImage: UIImage?
 
     var body: some View {
         NavigationStack {
@@ -75,6 +77,28 @@ struct ContentView: View {
                     errorMessage = error.localizedDescription
                 }
             }
+            .onAppear(perform: presentPendingPreviewIfNeeded)
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    presentPendingPreviewIfNeeded()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .translatedPreviewReady)) { _ in
+                presentPendingPreviewIfNeeded()
+            }
+            .fullScreenCover(
+                isPresented: Binding(
+                    get: { previewImage != nil },
+                    set: { if !$0 { dismissPreview() } }
+                )
+            ) {
+                if let previewImage {
+                    TranslatedPreviewView(
+                        image: previewImage,
+                        onClose: dismissPreview
+                    )
+                }
+            }
         }
     }
 
@@ -100,6 +124,51 @@ struct ContentView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+    private func presentPendingPreviewIfNeeded() {
+        guard previewImage == nil,
+              let image = PreviewStore.loadPendingImage()
+        else { return }
+
+        previewImage = image
+        PreviewStore.markPresented()
+    }
+
+    private func dismissPreview() {
+        previewImage = nil
+        PreviewStore.clear()
+    }
+}
+
+private struct TranslatedPreviewView: View {
+    let image: UIImage
+    let onClose: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .ignoresSafeArea(edges: .horizontal)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            HStack(spacing: 12) {
+                Button(action: onClose) {
+                    Text("关闭")
+                        .font(.title3.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 56)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+            .background(.ultraThinMaterial)
+        }
+        .statusBarHidden(false)
     }
 }
 
