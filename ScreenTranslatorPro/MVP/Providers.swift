@@ -125,6 +125,134 @@ struct OpenAICompatibleTranslator: TextTranslationProvider {
 
 
 
+struct BaiduOpenPlatformImageTranslator: Sendable {
+    let appID: String
+    let secret: String
+
+    func translate(image: UIImage, source: String, target: String) async throws -> UIImage {
+        guard !appID.isEmpty else { throw ScreenTranslatorError.missingCredential("百度 APP ID") }
+        guard !secret.isEmpty else { throw ScreenTranslatorError.missingCredential("百度 Key") }
+
+        let imageData = try Self.preparedJPEG(from: image)
+        let salt = String(UInt64.random(in: 100000...999999999))
+        let cuid = "APICUID"
+        let mac = "mac"
+        let imageMD5 = Self.md5Hex(imageData)
+        let signSource = appID + imageMD5 + salt + cuid + mac + secret
+        let sign = Self.md5Hex(Data(signSource.utf8))
+
+        var components = URLComponents(string: "https://fanyi-api.baidu.com/api/trans/sdk/picture")!
+        components.queryItems = [
+            URLQueryItem(name: "from", value: Self.baiduLanguage(source, allowAuto: true)),
+            URLQueryItem(name: "to", value: Self.baiduLanguage(target, allowAuto: false)),
+            URLQueryItem(name: "appid", value: appID),
+            URLQueryItem(name: "salt", value: salt),
+            URLQueryItem(name: "sign", value: sign),
+            URLQueryItem(name: "cuid", value: cuid),
+            URLQueryItem(name: "mac", value: mac),
+            URLQueryItem(name: "version", value: "3")
+        ]
+
+        guard let url = components.url else {
+            throw ScreenTranslatorError.invalidResponse("百度图片翻译 URL 无效")
+        }
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        body.appendUTF8("--\(boundary)\r\n")
+        body.appendUTF8("Content-Disposition: form-data; name=\"image\"; filename=\"screenshot.jpg\"\r\n")
+        body.appendUTF8("Content-Type: image/jpeg\r\n\r\n")
+        body.append(imageData)
+        body.appendUTF8("\r\n--\(boundary)--\r\n")
+        request.httpBody = body
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw ScreenTranslatorError.invalidResponse("百度图片翻译 HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+        }
+
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ScreenTranslatorError.invalidResponse("百度图片翻译返回非 JSON")
+        }
+
+        let errorCode = String(describing: root["error_code"] ?? "0")
+        if errorCode != "0" {
+            let message = String(describing: root["error_msg"] ?? "unknown")
+            throw ScreenTranslatorError.invalidResponse("百度图片翻译错误 \(errorCode)：\(message)")
+        }
+
+        var pasteBase64 = root["pasteImg"] as? String
+        if pasteBase64 == nil,
+           let content = root["content"] as? [[String: Any]] {
+            pasteBase64 = content.compactMap { $0["pasteImg"] as? String }.first(where: { !$0.isEmpty })
+        }
+
+        guard
+            let pasteBase64,
+            let pasteData = Data(base64Encoded: pasteBase64, options: .ignoreUnknownCharacters),
+            let output = UIImage(data: pasteData)
+        else {
+            throw ScreenTranslatorError.invalidResponse("百度未返回 pasteImg，请确认已开通图片翻译 API")
+        }
+
+        return output
+    }
+
+    private static func md5Hex(_ data: Data) -> String {
+        let digest = Insecure.MD5.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func preparedJPEG(from image: UIImage) throws -> Data {
+        var current = image
+        let maxDimension: CGFloat = 4096
+        let longest = max(current.size.width, current.size.height)
+
+        if longest > maxDimension {
+            let scale = maxDimension / longest
+            let targetSize = CGSize(
+                width: current.size.width * scale,
+                height: current.size.height * scale
+            )
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            current = UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+                current.draw(in: CGRect(origin: .zero, size: targetSize))
+            }
+        }
+
+        for quality in stride(from: 0.92, through: 0.45, by: -0.08) {
+            if let data = current.jpegData(compressionQuality: quality), data.count < 3_900_000 {
+                return data
+            }
+        }
+
+        throw ScreenTranslatorError.invalidResponse("图片压缩后仍超过百度 4MB 限制")
+    }
+
+    private static func baiduLanguage(_ code: String, allowAuto: Bool) -> String {
+        let lower = code.lowercased()
+        if allowAuto && lower == "auto" { return "auto" }
+
+        switch lower {
+        case "ja": return "jp"
+        case "ko": return "kor"
+        case "fr": return "fra"
+        case "es": return "spa"
+        case "vi": return "vie"
+        case "pt-br", "pt-pt": return "pt"
+        case "zh-cn": return "zh"
+        case "zh-tw": return "cht"
+        default: return lower
+        }
+    }
+}
+
 struct BaiduCloudImageTranslator: Sendable {
     let apiKey: String
     let secretKey: String
@@ -362,7 +490,7 @@ final class TranslationService: Sendable {
             }
         }
 
-        if kind == .baiduImageCloud {
+        if kind == .baiduImageOpen {
             throw ScreenTranslatorError.invalidResponse("百度图片翻译应走整图翻译流程")
         }
 
@@ -459,7 +587,7 @@ final class TranslationService: Sendable {
                 secret: SecretStore.shared.read(.baiduSecret) ?? ""
             )
 
-        case .baiduImageCloud:
+        case .baiduImageOpen:
             throw ScreenTranslatorError.invalidResponse("百度图片翻译不是文本 Provider")
 
         case .deepL:
