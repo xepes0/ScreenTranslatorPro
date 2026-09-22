@@ -276,3 +276,46 @@ final class ScreenTranslationEngine {
         return ScreenTranslationResult(image: renderer.render(original: image, items: translated), items: translated)
     }
 }
+
+
+extension Notification.Name {
+    static let translatedPreviewReady = Notification.Name("ScreenTranslatorPro.translatedPreviewReady")
+}
+
+enum PreviewStore {
+    private static let pendingKey = "translatedPreviewPending"
+
+    private static var fileURL: URL {
+        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ScreenTranslatorPro", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        return directory.appendingPathComponent("latest-translated.png")
+    }
+
+    static func save(_ image: UIImage) throws {
+        guard let data = image.pngData() else {
+            throw ScreenTranslatorError.invalidImage
+        }
+        try data.write(to: fileURL, options: .atomic)
+        UserDefaults.standard.set(true, forKey: pendingKey)
+        NotificationCenter.default.post(name: .translatedPreviewReady, object: nil)
+    }
+
+    static func loadPendingImage() -> UIImage? {
+        guard UserDefaults.standard.bool(forKey: pendingKey) else { return nil }
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        return UIImage(data: data)
+    }
+
+    static func markPresented() {
+        UserDefaults.standard.set(false, forKey: pendingKey)
+    }
+
+    static func clear() {
+        UserDefaults.standard.set(false, forKey: pendingKey)
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+}
