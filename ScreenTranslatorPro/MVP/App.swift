@@ -26,6 +26,7 @@ struct ContentView: View {
 
                     if let image = originalImage {
                         imageCard("原图", image)
+
                         Button {
                             Task { await translate(image) }
                         } label: {
@@ -49,7 +50,9 @@ struct ContentView: View {
                     }
 
                     if let errorMessage {
-                        Text(errorMessage).font(.footnote).foregroundStyle(.red)
+                        Text(errorMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -68,25 +71,35 @@ struct ContentView: View {
                         translatedImage = nil
                         errorMessage = nil
                     }
-                } catch { errorMessage = error.localizedDescription }
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
             }
         }
     }
 
-    @ViewBuilder private func imageCard(_ title: String, _ image: UIImage) -> some View {
+    @ViewBuilder
+    private func imageCard(_ title: String, _ image: UIImage) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).font(.headline)
-            Image(uiImage: image).resizable().scaledToFit()
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
                 .clipShape(RoundedRectangle(cornerRadius: 12))
         }
     }
 
-    @MainActor private func translate(_ image: UIImage) async {
+    @MainActor
+    private func translate(_ image: UIImage) async {
         isWorking = true
         errorMessage = nil
         defer { isWorking = false }
-        do { translatedImage = try await ScreenTranslationEngine().process(image: image).image }
-        catch { errorMessage = error.localizedDescription }
+
+        do {
+            translatedImage = try await ScreenTranslationEngine().process(image: image).image
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -94,8 +107,11 @@ struct SettingsView: View {
     @AppStorage(AppConfiguration.providerKey) private var providerRaw = ProviderKind.localOCR.rawValue
     @AppStorage(AppConfiguration.sourceLanguageKey) private var sourceLanguage = "auto"
     @AppStorage(AppConfiguration.targetLanguageKey) private var targetLanguage = "zh"
+
     @State private var baiduAppID = ""
     @State private var baiduSecret = ""
+    @State private var baiduCloudAPIKey = ""
+    @State private var baiduCloudSecretKey = ""
     @State private var deepLKey = ""
     @State private var openAIKey = ""
     @State private var openAIEndpoint = "https://api.openai.com/v1/chat/completions"
@@ -113,11 +129,14 @@ struct SettingsView: View {
         Form {
             Section("翻译服务") {
                 Picker("服务商", selection: providerBinding) {
-                    ForEach(ProviderKind.allCases) { Text($0.displayName).tag($0) }
+                    ForEach(ProviderKind.allCases) { item in
+                        Text(item.displayName).tag(item)
+                    }
                 }
+
                 TextField("源语言：auto / en / jp", text: $sourceLanguage)
                     .textInputAutocapitalization(.never)
-                TextField("目标语言：zh / en / ja", text: $targetLanguage)
+                TextField("目标语言：zh / en / jp", text: $targetLanguage)
                     .textInputAutocapitalization(.never)
             }
 
@@ -126,19 +145,41 @@ struct SettingsView: View {
                 Section("本地 OCR 测试") {
                     Text("不联网，只验证 OCR、坐标与原位回填。")
                 }
+
             case .baiduText:
                 Section("百度通用文本翻译") {
-                    TextField("APP ID", text: $baiduAppID).textInputAutocapitalization(.never)
+                    TextField("APP ID", text: $baiduAppID)
+                        .textInputAutocapitalization(.never)
                     SecureField("密钥", text: $baiduSecret)
+                    Text("使用百度翻译开放平台通用文本翻译。")
+                        .font(.footnote)
                 }
+
+            case .baiduImageCloud:
+                Section("百度图片翻译（整图实景回填）") {
+                    SecureField("百度智能云 API Key", text: $baiduCloudAPIKey)
+                        .textInputAutocapitalization(.never)
+                    SecureField("百度智能云 Secret Key", text: $baiduCloudSecretKey)
+                        .textInputAutocapitalization(.never)
+                    Text("使用百度智能云图片翻译接口，paste=1 直接返回整张实景回填图。此模式不经过本地 OCR/矩形覆盖。")
+                        .font(.footnote)
+                }
+
             case .deepL:
-                Section("DeepL") { SecureField("Auth Key", text: $deepLKey) }
+                Section("DeepL") {
+                    SecureField("Auth Key", text: $deepLKey)
+                        .textInputAutocapitalization(.never)
+                }
+
             case .openAICompatible:
                 Section("OpenAI-Compatible") {
                     SecureField("API Key", text: $openAIKey)
+                        .textInputAutocapitalization(.never)
                     TextField("Chat Completions Endpoint", text: $openAIEndpoint)
-                        .textInputAutocapitalization(.never).keyboardType(.URL)
-                    TextField("Model", text: $openAIModel).textInputAutocapitalization(.never)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                    TextField("Model", text: $openAIModel)
+                        .textInputAutocapitalization(.never)
                 }
             }
 
@@ -149,7 +190,9 @@ struct SettingsView: View {
 
             Section {
                 Button("保存 API 配置", action: save)
-                if let saveMessage { Text(saveMessage).font(.footnote) }
+                if let saveMessage {
+                    Text(saveMessage).font(.footnote)
+                }
             }
         }
         .navigationTitle("设置")
@@ -159,6 +202,8 @@ struct SettingsView: View {
     private func load() {
         baiduAppID = AppConfiguration.baiduAppID
         baiduSecret = SecretStore.shared.read(.baiduSecret) ?? ""
+        baiduCloudAPIKey = SecretStore.shared.read(.baiduCloudAPIKey) ?? ""
+        baiduCloudSecretKey = SecretStore.shared.read(.baiduCloudSecretKey) ?? ""
         deepLKey = SecretStore.shared.read(.deepLKey) ?? ""
         openAIKey = SecretStore.shared.read(.openAIKey) ?? ""
         openAIEndpoint = AppConfiguration.openAIEndpoint
@@ -169,11 +214,16 @@ struct SettingsView: View {
         UserDefaults.standard.set(baiduAppID, forKey: AppConfiguration.baiduAppIDKey)
         UserDefaults.standard.set(openAIEndpoint, forKey: AppConfiguration.openAIEndpointKey)
         UserDefaults.standard.set(openAIModel, forKey: AppConfiguration.openAIModelKey)
+
         do {
             try SecretStore.shared.write(baiduSecret, for: .baiduSecret)
+            try SecretStore.shared.write(baiduCloudAPIKey, for: .baiduCloudAPIKey)
+            try SecretStore.shared.write(baiduCloudSecretKey, for: .baiduCloudSecretKey)
             try SecretStore.shared.write(deepLKey, for: .deepLKey)
             try SecretStore.shared.write(openAIKey, for: .openAIKey)
             saveMessage = "已保存"
-        } catch { saveMessage = error.localizedDescription }
+        } catch {
+            saveMessage = error.localizedDescription
+        }
     }
 }
