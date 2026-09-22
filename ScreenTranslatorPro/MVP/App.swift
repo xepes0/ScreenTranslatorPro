@@ -236,7 +236,7 @@ struct SettingsView: View {
                     TextField("APP ID", text: $baiduAppID)
                         .textInputAutocapitalization(.never)
                     SecureField("Key", text: $baiduSecret)
-                    Text("与百度翻译开放平台里的 APP ID + 密钥一致。使用图片翻译接口直接返回整张实景回填图，不经过本地 OCR 矩形覆盖。")
+                    Text("高质量整图模式，版式更自然，但通常更慢。追求速度请选“百度快速翻译（推荐）”。")
                         .font(.footnote)
                 }
 
