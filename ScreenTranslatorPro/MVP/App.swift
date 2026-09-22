@@ -213,6 +213,15 @@ struct SettingsView: View {
                     Text("不联网，只验证 OCR、坐标与原位回填。")
                 }
 
+            case .baiduFast:
+                Section("百度快速翻译") {
+                    TextField("APP ID", text: $baiduAppID)
+                        .textInputAutocapitalization(.never)
+                    SecureField("Key", text: $baiduSecret)
+                    Text("本机 Vision OCR + 百度文本翻译 + 原位回填。速度优先，通常比整图图片翻译明显更快。")
+                        .font(.footnote)
+                }
+
             case .baiduText:
                 Section("百度通用文本翻译") {
                     TextField("APP ID", text: $baiduAppID)
