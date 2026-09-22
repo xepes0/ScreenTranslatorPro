@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import UIKit
 
 protocol TextTranslationProvider: Sendable {
     var kind: ProviderKind { get }
