@@ -22,11 +22,12 @@ struct OCRResult: Identifiable, Sendable {
 }
 
 enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
-    case localOCR, baiduText, baiduImageOpen, deepL, openAICompatible
+    case localOCR, baiduFast, baiduText, baiduImageOpen, deepL, openAICompatible
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .localOCR: return "本地 OCR（不翻译）"
+        case .baiduFast: return "百度快速翻译（推荐）"
         case .baiduText: return "百度通用文本翻译"
         case .baiduImageOpen: return "百度图片翻译（APP ID + Key）"
         case .deepL: return "DeepL"
