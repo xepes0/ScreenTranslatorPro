@@ -660,12 +660,122 @@ private actor TranslationMemory {
 }
 
 private enum TranslationGuard {
+    struct ProtectedText: Sendable {
+        let source: String
+        let masked: String
+        let replacements: [String: String]
+
+        var hasProtectedContent: Bool {
+            !replacements.isEmpty
+        }
+
+        func restore(_ translated: String) -> String {
+            var output = translated
+
+            for (placeholder, original) in replacements {
+                if let range = output.range(
+                    of: placeholder,
+                    options: [.caseInsensitive]
+                ) {
+                    output.replaceSubrange(range, with: original)
+                    continue
+                }
+
+                // 少数翻译服务可能在占位符周围插入空格。
+                // 再做一次忽略空白的宽松恢复。
+                let compactPlaceholder = placeholder.replacingOccurrences(
+                    of: " ",
+                    with: ""
+                )
+
+                var compactIndexMap: [String.Index] = []
+                var compact = ""
+                var index = output.startIndex
+
+                while index < output.endIndex {
+                    if !output[index].isWhitespace {
+                        compactIndexMap.append(index)
+                        compact.append(output[index])
+                    }
+                    index = output.index(after: index)
+                }
+
+                if let compactRange = compact.range(
+                    of: compactPlaceholder,
+                    options: [.caseInsensitive]
+                ) {
+                    let lowerOffset = compact.distance(
+                        from: compact.startIndex,
+                        to: compactRange.lowerBound
+                    )
+                    let upperOffset = compact.distance(
+                        from: compact.startIndex,
+                        to: compactRange.upperBound
+                    )
+
+                    if lowerOffset < compactIndexMap.count,
+                       upperOffset > 0,
+                       upperOffset - 1 < compactIndexMap.count {
+                        let lower = compactIndexMap[lowerOffset]
+                        let last = compactIndexMap[upperOffset - 1]
+                        let upper = output.index(after: last)
+                        output.replaceSubrange(lower..<upper, with: original)
+                    }
+                }
+            }
+
+            return output
+        }
+    }
+
     private static let technicalAcronyms: Set<String> = [
         "AI", "API", "ASCII", "CJK", "CPU", "DNS", "GPU", "HTTP", "HTTPS",
-        "ID", "IP", "JSON", "NFC", "OCR", "RAM", "RGB", "SIM", "SSH",
-        "TCP", "TLS", "UDP", "UI", "URL", "USB", "UUID", "VPN", "WiFi",
-        "XML"
+        "ID", "IP", "JSON", "NFC", "OCR", "RAM", "RGB", "SIM", "SFTP", "SSH",
+        "TCP", "TLS", "UDP", "UI", "URL", "USB", "UUID", "VPN", "WiFi", "XML"
     ]
+
+    private static let inlineTechnicalRegexes: [NSRegularExpression] = {
+        let patterns = [
+            // URL（含 path / query / fragment）
+            "https?://[^\\s<>\\\"'’”]+",
+            "www\\.[A-Za-z0-9.-]+(?:/[^\\s<>\\\"'’”]*)?",
+            // Email
+            "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+            // IPv4 + optional port
+            "(?<![A-Za-z0-9])(?:\\d{1,3}\\.){3}\\d{1,3}(?::\\d{1,5})?(?![A-Za-z0-9])",
+            // IPv6-ish token
+            "(?<![A-Za-z0-9])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,}(?![A-Za-z0-9])",
+            // Domain / host + optional path
+            "(?<![A-Za-z0-9_-])(?:[A-Za-z0-9-]+\\.)+[A-Za-z]{2,}(?:/[A-Za-z0-9._~:/?#@!$&()*+,;=%-]*)?",
+            // Unix / home path
+            "(?<![A-Za-z0-9])(?:~?/)(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+",
+            // Windows path
+            "(?<![A-Za-z0-9])[A-Za-z]:[\\\\/](?:[^\\s<>:\\"|?*]+[\\\\/]?)+",
+            // Version / hex
+            "(?<![A-Za-z0-9])[vV]?\\d+(?:\\.\\d+){1,4}(?:[-+][A-Za-z0-9._-]+)?(?![A-Za-z0-9])",
+            "(?<![A-Za-z0-9])0x[0-9A-Fa-f]+(?![A-Za-z0-9])",
+            // CLI flags: -p / --port
+            "(?<![A-Za-z0-9])--?[A-Za-z][A-Za-z0-9-]*(?![A-Za-z0-9])",
+            // Technical tokens containing digits: xterm-256color / arm64-v8a
+            "(?<![A-Za-z0-9])(?=[A-Za-z0-9._-]*\\d)[A-Za-z][A-Za-z0-9._-]{2,}(?![A-Za-z0-9])"
+        ]
+
+        return patterns.compactMap {
+            try? NSRegularExpression(pattern: $0)
+        }
+    }()
+
+    private static let acronymRegex: NSRegularExpression = {
+        let body = technicalAcronyms
+            .sorted { $0.count > $1.count }
+            .map(NSRegularExpression.escapedPattern(for:))
+            .joined(separator: "|")
+
+        return try! NSRegularExpression(
+            pattern: "(?<![A-Za-z0-9])(?:\\(body))(?![A-Za-z0-9])",
+            options: [.caseInsensitive]
+        )
+    }()
 
     private static func isWindowsPath(_ text: String) -> Bool {
         let scalars = Array(text.unicodeScalars)
@@ -680,18 +790,16 @@ private enum TranslationGuard {
         let text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return true }
 
-        // iPhone 状态栏处于截图最顶部。时间、电量、运营商等不应送去翻译，
-        // 否则 OCR 偶尔会把 08:31 识别为 8.314 一类文本。
+        // iPhone 状态栏。
         if item.boundingBox.midY > 0.962 {
             return true
         }
 
-        // 没有字母的纯数字、时间、百分比、符号本身无需翻译。
+        // 没有字母的纯数字、时间、百分比、符号。
         if text.rangeOfCharacter(from: .letters) == nil {
             return true
         }
 
-        // 字体预览常见的 Aa 是视觉样例，不是自然语言。
         if text == "Aa" || text == "AA" || text == "aA" {
             return true
         }
@@ -711,37 +819,44 @@ private enum TranslationGuard {
             return true
         }
 
-        // URL、邮箱、文件路径、Bundle ID / 域名。
-        if text.contains("://") ||
-           text.contains("@") ||
-           text.hasPrefix("/") ||
-           text.hasPrefix("~/") ||
-           isWindowsPath(text) ||
-           text.range(
-               of: #"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$"#,
-               options: .regularExpression
-           ) != nil {
+        // 整行就是 URL / 邮箱 / 路径 / host 时直接保留。
+        if !text.contains(" "),
+           (
+               text.hasPrefix("http://") ||
+               text.hasPrefix("https://") ||
+               text.hasPrefix("www.") ||
+               text.contains("@") ||
+               text.hasPrefix("/") ||
+               text.hasPrefix("~/") ||
+               isWindowsPath(text) ||
+               text.range(
+                   of: "^[A-Za-z][A-Za-z0-9_-]*(\\.[A-Za-z0-9_-]+){2,}$",
+                   options: .regularExpression
+               ) != nil
+           ) {
             return true
         }
 
         // IPv4 / IPv6 / MAC / 端口形式。
         if text.range(
-            of: #"^(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?$"#,
+            of: "^(?:\\d{1,3}\\.){3}\\d{1,3}(?::\\d{1,5})?$",
             options: .regularExpression
         ) != nil ||
         (text.contains(":") &&
-         text.range(of: #"^[0-9A-Fa-f:]+$"#, options: .regularExpression) != nil) {
+         text.range(
+            of: "^[0-9A-Fa-f:]+$",
+            options: .regularExpression
+         ) != nil) {
             return true
         }
 
-        // 版本号、十六进制、技术型单 token，例如：
-        // v1.2.3 / 0x1234 / xterm-256color / arm64-v8a。
+        // 版本号、十六进制、技术型单 token。
         if text.range(
-            of: #"^[vV]?\d+(?:\.\d+){1,4}(?:[-+][A-Za-z0-9._-]+)?$"#,
+            of: "^[vV]?\\d+(?:\\.\\d+){1,4}(?:[-+][A-Za-z0-9._-]+)?$",
             options: .regularExpression
         ) != nil ||
         text.range(
-            of: #"^0x[0-9A-Fa-f]+$"#,
+            of: "^0x[0-9A-Fa-f]+$",
             options: .regularExpression
         ) != nil {
             return true
@@ -749,21 +864,125 @@ private enum TranslationGuard {
 
         if !text.contains(" "),
            text.rangeOfCharacter(from: .decimalDigits) != nil,
-           text.rangeOfCharacter(from: CharacterSet(charactersIn: "-_./:")) != nil {
+           text.rangeOfCharacter(
+               from: CharacterSet(charactersIn: "-_./:")
+           ) != nil {
             return true
         }
 
-        // 常见命令行/代码片段不做自然语言翻译。
-        if text.hasPrefix("$ ") ||
-           text.hasPrefix("# ") ||
+        // Shell / code 行整体不翻译。
+        if looksLikeShellCommand(text) ||
            text.contains("::") ||
            text.contains("->") ||
-           text.contains("=>") ||
-           text.contains("--") {
+           text.contains("=>") {
             return true
         }
 
         return false
+    }
+
+    static func protectInlineTechnicalContent(_ text: String) -> ProtectedText {
+        guard !text.isEmpty else {
+            return ProtectedText(
+                source: text,
+                masked: text,
+                replacements: [:]
+            )
+        }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        var candidateRanges: [NSRange] = []
+
+        for regex in inlineTechnicalRegexes {
+            candidateRanges.append(
+                contentsOf: regex.matches(
+                    in: text,
+                    range: fullRange
+                ).map(\.range)
+            )
+        }
+
+        candidateRanges.append(
+            contentsOf: acronymRegex.matches(
+                in: text,
+                range: fullRange
+            ).map(\.range)
+        )
+
+        // 长匹配优先，并去掉重叠范围，例如 URL 内部的域名不重复保护。
+        let sorted = candidateRanges
+            .filter { $0.location != NSNotFound && $0.length > 0 }
+            .sorted {
+                if $0.length != $1.length {
+                    return $0.length > $1.length
+                }
+                return $0.location < $1.location
+            }
+
+        var selected: [NSRange] = []
+
+        for range in sorted {
+            let overlaps = selected.contains {
+                NSIntersectionRange($0, range).length > 0
+            }
+            if !overlaps {
+                selected.append(range)
+            }
+        }
+
+        selected.sort { $0.location < $1.location }
+
+        guard !selected.isEmpty else {
+            return ProtectedText(
+                source: text,
+                masked: text,
+                replacements: [:]
+            )
+        }
+
+        var masked = text
+        var replacements: [String: String] = [:]
+
+        // 倒序替换，保证 UTF-16 range 不受前面替换影响。
+        for (index, range) in selected.enumerated().reversed() {
+            guard let swiftRange = Range(range, in: masked) else {
+                continue
+            }
+
+            let original = String(masked[swiftRange])
+            let placeholder = "ZXQSTP\\(index)QXZ"
+            replacements[placeholder] = original
+            masked.replaceSubrange(swiftRange, with: placeholder)
+        }
+
+        return ProtectedText(
+            source: text,
+            masked: masked,
+            replacements: replacements
+        )
+    }
+
+    private static func looksLikeShellCommand(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("$ ") || trimmed.hasPrefix("# ") {
+            return true
+        }
+
+        let first = trimmed
+            .split(whereSeparator: { $0.isWhitespace })
+            .first?
+            .lowercased() ?? ""
+
+        let commands: Set<String> = [
+            "awk", "bash", "brew", "cat", "cd", "chmod", "chown",
+            "cp", "curl", "git", "grep", "head", "ls", "mv", "nc",
+            "node", "npm", "ping", "python", "python3", "rm", "rsync",
+            "scp", "sed", "sftp", "ssh", "sudo", "tail", "tar",
+            "wget", "zsh"
+        ]
+
+        return commands.contains(first)
     }
 }
 
