@@ -667,6 +667,15 @@ private enum TranslationGuard {
         "XML"
     ]
 
+    private static func isWindowsPath(_ text: String) -> Bool {
+        let scalars = Array(text.unicodeScalars)
+        guard scalars.count >= 3 else { return false }
+
+        return CharacterSet.letters.contains(scalars[0]) &&
+            scalars[1].value == 58 &&
+            (scalars[2].value == 92 || scalars[2].value == 47)
+    }
+
     static func shouldPreserve(_ item: OCRResult) -> Bool {
         let text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return true }
@@ -707,10 +716,7 @@ private enum TranslationGuard {
            text.contains("@") ||
            text.hasPrefix("/") ||
            text.hasPrefix("~/") ||
-           text.range(
-               of: #"^[A-Za-z]:\\",
-               options: .regularExpression
-           ) != nil ||
+           isWindowsPath(text) ||
            text.range(
                of: #"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$"#,
                options: .regularExpression
