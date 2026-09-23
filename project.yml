@@ -7,13 +7,28 @@ settings:
   base:
     SWIFT_VERSION: "5.10"
     MARKETING_VERSION: "0.2.0"
-    CURRENT_PROJECT_VERSION: "23"
+    CURRENT_PROJECT_VERSION: "24"
 targets:
   ScreenTranslatorPro:
     type: application
     platform: iOS
     sources:
       - path: ScreenTranslatorPro/MVP
+    preBuildScripts:
+      - name: Generate selected app icon assets
+        script: |
+          set -e
+          PARTS_DIR="$SRCROOT/Assets"
+          ICON_SOURCE="$DERIVED_FILE_DIR/IconSource.jpg"
+          APPICON_DIR="$SRCROOT/ScreenTranslatorPro/MVP/Assets.xcassets/AppIcon.appiconset"
+          LOGO_DIR="$SRCROOT/ScreenTranslatorPro/MVP/Assets.xcassets/AppLogo.imageset"
+
+          cat             "$PARTS_DIR/IconSource.b64.part00"             "$PARTS_DIR/IconSource.b64.part01"             "$PARTS_DIR/IconSource.b64.part02"             | /usr/bin/base64 -D > "$ICON_SOURCE"
+
+          /usr/bin/sips -z 1024 1024 -s format png "$ICON_SOURCE" --out "$APPICON_DIR/AppIcon.png" >/dev/null
+          /usr/bin/sips -z 128 128 -s format png "$ICON_SOURCE" --out "$LOGO_DIR/AppLogo.png" >/dev/null
+          /usr/bin/sips -z 256 256 -s format png "$ICON_SOURCE" --out "$LOGO_DIR/AppLogo@2x.png" >/dev/null
+          /usr/bin/sips -z 384 384 -s format png "$ICON_SOURCE" --out "$LOGO_DIR/AppLogo@3x.png" >/dev/null
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.xepes.ScreenTranslatorPro
@@ -25,4 +40,5 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         ENABLE_PREVIEWS: NO
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
