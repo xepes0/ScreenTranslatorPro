@@ -12,13 +12,22 @@ struct OCRResult: Identifiable, Sendable {
     let text: String
     let boundingBox: CGRect
     let confidence: Float
+    let layoutLineCount: Int
     var translation: String
 
-    init(id: UUID = UUID(), text: String, boundingBox: CGRect, confidence: Float, translation: String = "") {
+    init(
+        id: UUID = UUID(),
+        text: String,
+        boundingBox: CGRect,
+        confidence: Float,
+        layoutLineCount: Int = 1,
+        translation: String = ""
+    ) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
         self.confidence = confidence
+        self.layoutLineCount = max(1, layoutLineCount)
         self.translation = translation
     }
 }
@@ -159,6 +168,260 @@ final class VisionOCRManager {
     }
 }
 
+struct TextLayoutGrouper {
+    private struct Line {
+        var items: [OCRResult]
+
+        var text: String {
+            items.map(\.text).joined(separator: " ")
+        }
+
+        var boundingBox: CGRect {
+            items.dropFirst().reduce(items[0].boundingBox) {
+                $0.union($1.boundingBox)
+            }
+        }
+
+        var confidence: Float {
+            guard !items.isEmpty else { return 0 }
+            return items.map(\.confidence).reduce(0, +) / Float(items.count)
+        }
+
+        var averageHeight: CGFloat {
+            items.map { $0.boundingBox.height }.reduce(0, +) / CGFloat(items.count)
+        }
+    }
+
+    func prepare(_ items: [OCRResult]) -> [OCRResult] {
+        guard items.count > 1 else { return items }
+
+        let lines = buildLines(from: items)
+        return buildLayoutItems(from: lines)
+    }
+
+    private func buildLines(from items: [OCRResult]) -> [Line] {
+        let sorted = items.sorted {
+            let rowDelta = abs($0.boundingBox.midY - $1.boundingBox.midY)
+            return rowDelta > 0.018
+                ? $0.boundingBox.midY > $1.boundingBox.midY
+                : $0.boundingBox.minX < $1.boundingBox.minX
+        }
+
+        var lines: [Line] = []
+
+        for item in sorted {
+            if let index = bestLineIndex(for: item, in: lines) {
+                lines[index].items.append(item)
+                lines[index].items.sort { $0.boundingBox.minX < $1.boundingBox.minX }
+            } else {
+                lines.append(Line(items: [item]))
+            }
+        }
+
+        return lines.sorted {
+            let delta = abs($0.boundingBox.midY - $1.boundingBox.midY)
+            return delta > 0.018
+                ? $0.boundingBox.midY > $1.boundingBox.midY
+                : $0.boundingBox.minX < $1.boundingBox.minX
+        }
+    }
+
+    private func bestLineIndex(for item: OCRResult, in lines: [Line]) -> Int? {
+        var best: (index: Int, score: CGFloat)?
+
+        for (index, line) in lines.enumerated() {
+            let box = line.boundingBox
+            let minHeight = max(0.0001, min(box.height, item.boundingBox.height))
+            let maxHeight = max(box.height, item.boundingBox.height)
+            let heightRatio = maxHeight / minHeight
+
+            guard heightRatio <= 1.42 else { continue }
+
+            let verticalDelta = abs(box.midY - item.boundingBox.midY)
+            let rowTolerance = max(0.004, minHeight * 0.48)
+            guard verticalDelta <= rowTolerance else { continue }
+
+            let gap: CGFloat
+            if item.boundingBox.minX >= box.maxX {
+                gap = item.boundingBox.minX - box.maxX
+            } else if box.minX >= item.boundingBox.maxX {
+                gap = box.minX - item.boundingBox.maxX
+            } else {
+                gap = 0
+            }
+
+            let gapLimit = max(0.018, maxHeight * 1.9)
+            guard gap <= gapLimit else { continue }
+
+            let score = verticalDelta * 8 + gap
+            if best == nil || score < best!.score {
+                best = (index, score)
+            }
+        }
+
+        return best?.index
+    }
+
+    private func buildLayoutItems(from lines: [Line]) -> [OCRResult] {
+        guard !lines.isEmpty else { return [] }
+
+        var output: [OCRResult] = []
+        var paragraph: [Line] = []
+
+        func flushParagraph() {
+            guard !paragraph.isEmpty else { return }
+
+            if paragraph.count == 1 {
+                output.append(makeLineItem(paragraph[0]))
+            } else {
+                output.append(makeParagraphItem(paragraph))
+            }
+            paragraph.removeAll(keepingCapacity: true)
+        }
+
+        for line in lines {
+            guard isParagraphCandidate(line) else {
+                flushParagraph()
+                output.append(makeLineItem(line))
+                continue
+            }
+
+            if paragraph.isEmpty {
+                paragraph = [line]
+                continue
+            }
+
+            if shouldJoinParagraph(paragraph, next: line) {
+                paragraph.append(line)
+            } else {
+                flushParagraph()
+                paragraph = [line]
+            }
+        }
+
+        flushParagraph()
+
+        return output.sorted {
+            let delta = abs($0.boundingBox.midY - $1.boundingBox.midY)
+            return delta > 0.018
+                ? $0.boundingBox.midY > $1.boundingBox.midY
+                : $0.boundingBox.minX < $1.boundingBox.minX
+        }
+    }
+
+    private func makeLineItem(_ line: Line) -> OCRResult {
+        OCRResult(
+            text: line.text,
+            boundingBox: line.boundingBox,
+            confidence: line.confidence,
+            layoutLineCount: 1
+        )
+    }
+
+    private func makeParagraphItem(_ lines: [Line]) -> OCRResult {
+        let box = lines.dropFirst().reduce(lines[0].boundingBox) {
+            $0.union($1.boundingBox)
+        }
+        let confidence = lines.map(\.confidence).reduce(0, +) / Float(lines.count)
+
+        // 用空格连接而不是换行，避免百度快速模式按换行切批次时把一个段落拆开。
+        let text = lines.map(\.text).joined(separator: " ")
+
+        return OCRResult(
+            text: text,
+            boundingBox: box,
+            confidence: confidence,
+            layoutLineCount: lines.count
+        )
+    }
+
+    private func shouldJoinParagraph(_ current: [Line], next: Line) -> Bool {
+        guard let previous = current.last else { return false }
+        guard current.count < 5 else { return false }
+        guard isParagraphCandidate(previous), isParagraphCandidate(next) else {
+            return false
+        }
+
+        let previousBox = previous.boundingBox
+        let nextBox = next.boundingBox
+        let averageHeight = (previous.averageHeight + next.averageHeight) / 2
+        let minHeight = max(0.0001, min(previous.averageHeight, next.averageHeight))
+        let heightRatio = max(previous.averageHeight, next.averageHeight) / minHeight
+
+        // 标题 + 正文通常字号不同，保守地不合并。
+        guard heightRatio <= 1.20 else { return false }
+
+        let verticalGap = previousBox.minY - nextBox.maxY
+        guard verticalGap >= -0.003 else { return false }
+        guard verticalGap <= max(0.012, averageHeight * 1.05) else { return false }
+
+        let leftDelta = abs(previousBox.minX - nextBox.minX)
+        let leftAligned = leftDelta <= max(0.018, averageHeight * 0.85)
+
+        let centerDelta = abs(previousBox.midX - nextBox.midX)
+        let centered = centerDelta <= 0.035 &&
+            abs(previousBox.width - nextBox.width) <= 0.16
+
+        guard leftAligned || centered else { return false }
+
+        // 只有看起来像连续说明/正文的行才合并，避免把两个按钮或列表项拼成段落。
+        let previousLong = proseScore(previous.text) >= 2
+        let nextLong = proseScore(next.text) >= 2
+        guard previousLong && nextLong else { return false }
+
+        return true
+    }
+
+    private func isParagraphCandidate(_ line: Line) -> Bool {
+        let box = line.boundingBox
+        let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !text.isEmpty else { return false }
+
+        // 状态栏和底部 Tab 保持单独处理。
+        if box.maxY > 0.955 || box.minY < 0.075 {
+            return false
+        }
+
+        // 技术字符串/日志前缀不做段落合并。
+        if text.contains("://") ||
+           text.contains("@") ||
+           text.contains("::") ||
+           text.contains("->") ||
+           text.contains("=>") ||
+           text.hasPrefix("$ ") ||
+           text.hasPrefix("# ") {
+            return false
+        }
+
+        if let first = text.unicodeScalars.first,
+           CharacterSet.symbols.contains(first) {
+            return false
+        }
+
+        return true
+    }
+
+    private func proseScore(_ text: String) -> Int {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let letters = trimmed.unicodeScalars.filter {
+            CharacterSet.letters.contains($0)
+        }.count
+
+        var score = 0
+        if letters >= 14 { score += 1 }
+        if trimmed.count >= 20 { score += 1 }
+        if trimmed.contains(" ") { score += 1 }
+        if trimmed.hasSuffix(",") ||
+           trimmed.hasSuffix(".") ||
+           trimmed.hasSuffix(";") ||
+           trimmed.hasSuffix(":") {
+            score += 1
+        }
+        return score
+    }
+}
+
 private extension CGImagePropertyOrientation {
     init(_ orientation: UIImage.Orientation) {
         switch orientation {
@@ -241,7 +504,8 @@ final class OverlayRenderer {
                     eraseRect: eraseRect,
                     imageSize: original.size,
                     foreground: foreground,
-                    weight: fontWeight
+                    weight: fontWeight,
+                    sourceLineCount: item.layoutLineCount
                 )
             }
         }
@@ -427,11 +691,16 @@ final class OverlayRenderer {
         eraseRect: CGRect,
         imageSize: CGSize,
         foreground: UIColor,
-        weight: UIFont.Weight
+        weight: UIFont.Weight,
+        sourceLineCount: Int
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let isSingleLine = !trimmed.contains("\n") && originalRect.height < imageSize.height * 0.06
+
+        let isParagraph = sourceLineCount > 1
+        let isSingleLine = !isParagraph &&
+            !trimmed.contains("\n") &&
+            originalRect.height < imageSize.height * 0.06
 
         let horizontalInset = max(1, min(3, originalRect.height * 0.07))
         let drawWidth = max(1, eraseRect.width - horizontalInset * 2)
@@ -443,7 +712,8 @@ final class OverlayRenderer {
             availableWidth: drawWidth,
             imageSize: imageSize,
             singleLine: isSingleLine,
-            weight: weight
+            weight: weight,
+            sourceLineCount: sourceLineCount
         )
 
         let paragraph = NSMutableParagraphStyle()
@@ -453,7 +723,8 @@ final class OverlayRenderer {
         )
         paragraph.lineBreakMode = isSingleLine ? .byClipping : .byWordWrapping
         paragraph.minimumLineHeight = font.lineHeight * 0.92
-        paragraph.maximumLineHeight = font.lineHeight * 1.05
+        paragraph.maximumLineHeight = font.lineHeight * (isParagraph ? 1.10 : 1.05)
+        paragraph.lineSpacing = isParagraph ? max(0, font.pointSize * 0.06) : 0
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -491,7 +762,9 @@ final class OverlayRenderer {
             x: eraseRect.minX + horizontalInset,
             y: eraseRect.minY,
             width: drawWidth,
-            height: max(originalRect.height * 1.35, eraseRect.height)
+            height: isParagraph
+                ? max(1, eraseRect.height)
+                : max(originalRect.height * 1.35, eraseRect.height)
         )
 
         let measured = string.boundingRect(
@@ -540,17 +813,43 @@ final class OverlayRenderer {
         availableWidth: CGFloat,
         imageSize: CGSize,
         singleLine: Bool,
-        weight: UIFont.Weight
+        weight: UIFont.Weight,
+        sourceLineCount: Int
     ) -> UIFont {
-        let isLargeTitle = originalRect.height > imageSize.height * 0.028
+        let lineCount = max(1, sourceLineCount)
+        let sourceLineHeight = lineCount > 1
+            ? originalRect.height / (CGFloat(lineCount) + CGFloat(lineCount - 1) * 0.18)
+            : originalRect.height
+
+        let isLargeTitle = sourceLineHeight > imageSize.height * 0.028
 
         // beta15：先用“原文实际宽度”反推原字体大小，再用同样字号绘制译文。
         // 这样不会再单纯依赖 OCR 高度而把中文缩得过小。
-        let sourceSize = estimatedSourceFontSize(
-            originalText: originalText,
-            originalRect: originalRect,
-            weight: weight
-        )
+        let sizingText: String
+        let sizingRect: CGRect
+
+        if lineCount > 1 {
+            // 段落已经由多行合并，不能拿整段宽度反推字号；
+            // 用单行高度作为主参考，避免字号被 union rect 放大。
+            sizingText = originalText
+            sizingRect = CGRect(
+                x: originalRect.minX,
+                y: originalRect.minY,
+                width: originalRect.width,
+                height: sourceLineHeight
+            )
+        } else {
+            sizingText = originalText
+            sizingRect = originalRect
+        }
+
+        let sourceSize = lineCount > 1
+            ? max(8, sourceLineHeight * 1.16)
+            : estimatedSourceFontSize(
+                originalText: sizingText,
+                originalRect: sizingRect,
+                weight: weight
+            )
 
         let opticalBoost: CGFloat
         if isLargeTitle {
@@ -566,11 +865,11 @@ final class OverlayRenderer {
 
         // OCR 偶尔给出偏窄的源文字框；用高度给一个合理下限，
         // 但不再像旧版那样把字号硬限制在 OCR 高度附近。
-        let heightFloor = originalRect.height * (isLargeTitle ? 1.22 : 1.16)
+        let heightFloor = sourceLineHeight * (isLargeTitle ? 1.22 : 1.16)
         preferred = max(preferred, heightFloor)
 
         // 防止异常 OCR 框把字号推得过大。
-        let heightCeiling = originalRect.height * (isLargeTitle ? 1.72 : 1.58)
+        let heightCeiling = sourceLineHeight * (isLargeTitle ? 1.72 : 1.58)
         preferred = min(preferred, heightCeiling)
 
         func width(of size: CGFloat) -> CGFloat {
@@ -611,7 +910,9 @@ final class OverlayRenderer {
             let bounds = (text as NSString).boundingRect(
                 with: CGSize(
                     width: availableWidth,
-                    height: originalRect.height * 1.75
+                    height: sourceLineCount > 1
+                        ? originalRect.height * 1.02
+                        : originalRect.height * 1.75
                 ),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [.font: font],
@@ -619,7 +920,9 @@ final class OverlayRenderer {
             )
 
             return bounds.width <= availableWidth + 0.5 &&
-                bounds.height <= originalRect.height * 1.75
+                bounds.height <= (sourceLineCount > 1
+                    ? originalRect.height * 1.02
+                    : originalRect.height * 1.75)
         }
 
         if fitsMultiline(preferred) {
@@ -1082,6 +1385,7 @@ struct ScreenTranslationResult { let image: UIImage; let items: [OCRResult] }
 
 final class ScreenTranslationEngine {
     private let ocr = VisionOCRManager()
+    private let grouper = TextLayoutGrouper()
     private let service = TranslationService()
     private let renderer = OverlayRenderer()
 
@@ -1104,8 +1408,18 @@ final class ScreenTranslationEngine {
             fast: AppConfiguration.provider == .baiduFast
         )
         guard !found.isEmpty else { throw ScreenTranslatorError.noTextFound }
-        let translated = try await service.translate(found, source: source, target: target)
-        return ScreenTranslationResult(image: renderer.render(original: image, items: translated), items: translated)
+
+        let layoutItems = grouper.prepare(found)
+        let translated = try await service.translate(
+            layoutItems,
+            source: source,
+            target: target
+        )
+
+        return ScreenTranslationResult(
+            image: renderer.render(original: image, items: translated),
+            items: translated
+        )
     }
 }
 
