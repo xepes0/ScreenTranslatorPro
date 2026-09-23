@@ -130,9 +130,19 @@ final class VisionOCRManager {
                 if let error { continuation.resume(throwing: error); return }
                 let values = (request.results as? [VNRecognizedTextObservation] ?? []).compactMap { observation -> OCRResult? in
                     guard let candidate = observation.topCandidates(1).first else { return nil }
-                    let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !text.isEmpty else { return nil }
-                    return OCRResult(text: text, boundingBox: observation.boundingBox, confidence: candidate.confidence)
+
+                    let sanitized = Self.sanitizeRecognizedText(
+                        candidate,
+                        fallbackBox: observation.boundingBox
+                    )
+
+                    guard !sanitized.text.isEmpty else { return nil }
+
+                    return OCRResult(
+                        text: sanitized.text,
+                        boundingBox: sanitized.boundingBox,
+                        confidence: candidate.confidence
+                    )
                 }.sorted {
                     let rowDelta = abs($0.boundingBox.midY - $1.boundingBox.midY)
                     return rowDelta > 0.03 ? $0.boundingBox.midY > $1.boundingBox.midY : $0.boundingBox.minX < $1.boundingBox.minX
@@ -151,6 +161,177 @@ final class VisionOCRManager {
                 ).perform([request])
             } catch { continuation.resume(throwing: error) }
         }
+    }
+
+    private struct SanitizedRecognition {
+        let text: String
+        let boundingBox: CGRect
+    }
+
+    private struct TokenRange {
+        let text: String
+        let range: Range<String.Index>
+    }
+
+    private static func sanitizeRecognizedText(
+        _ candidate: VNRecognizedText,
+        fallbackBox: CGRect
+    ) -> SanitizedRecognition {
+        let raw = candidate.string
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return SanitizedRecognition(text: "", boundingBox: fallbackBox)
+        }
+
+        let tokens = tokenRanges(in: raw)
+        guard tokens.count >= 2 else {
+            return SanitizedRecognition(text: trimmed, boundingBox: fallbackBox)
+        }
+
+        // Vision 有时会把左侧图标和右侧文案识别为同一个 observation：
+        // “151 Start a serial connection”
+        // “((•)) Discover local devices”
+        // “p, ) Biometric-protected”
+        //
+        // beta20 只能处理“图标和文字分成两个 observation”的情况。
+        // 这里直接在 OCR 源头裁掉可疑前缀，并用 VNRecognizedText 的
+        // substring boundingBox 把文字框左边界同步裁到真实文案位置，
+        // 因而不会擦掉原始图标。
+        let maxPrefixTokens = min(3, tokens.count - 1)
+
+        for prefixCount in stride(from: maxPrefixTokens, through: 1, by: -1) {
+            let prefixTokens = Array(tokens.prefix(prefixCount))
+            let suffixToken = tokens[prefixCount]
+
+            let prefixStart = prefixTokens[0].range.lowerBound
+            let prefixEnd = prefixTokens[prefixTokens.count - 1].range.upperBound
+            let suffixStart = suffixToken.range.lowerBound
+            let suffixRange = suffixStart..<raw.endIndex
+
+            let prefixText = String(raw[prefixStart..<prefixEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard isLikelyIconArtifact(prefixText) else { continue }
+
+            guard
+                let prefixObservation = try? candidate.boundingBox(
+                    for: prefixStart..<prefixEnd
+                ),
+                let suffixObservation = try? candidate.boundingBox(
+                    for: suffixRange
+                )
+            else {
+                continue
+            }
+
+            let prefixBox = prefixObservation.boundingBox
+            let suffixBox = suffixObservation.boundingBox
+
+            let horizontalGap = suffixBox.minX - prefixBox.maxX
+            let referenceHeight = max(
+                0.0001,
+                min(prefixBox.height, suffixBox.height)
+            )
+
+            // 单个字母（例如图标被误认成 “I” 或 “p,”）需要更大的间隔
+            // 才裁掉，避免误伤真正的 “I agree” / “A host” 等句子。
+            let letterCount = prefixText.unicodeScalars.filter {
+                CharacterSet.letters.contains($0)
+            }.count
+
+            let requiredGap: CGFloat = letterCount == 0
+                ? max(0.0045, referenceHeight * 0.20)
+                : max(0.010, referenceHeight * 0.42)
+
+            guard horizontalGap >= requiredGap else { continue }
+
+            let suffixText = String(raw[suffixRange])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard
+                suffixText.count >= 2,
+                suffixText.unicodeScalars.contains(where: {
+                    CharacterSet.letters.contains($0)
+                })
+            else {
+                continue
+            }
+
+            return SanitizedRecognition(
+                text: suffixText,
+                boundingBox: suffixBox
+            )
+        }
+
+        return SanitizedRecognition(
+            text: trimmed,
+            boundingBox: fallbackBox
+        )
+    }
+
+    private static func tokenRanges(in text: String) -> [TokenRange] {
+        var output: [TokenRange] = []
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            while index < text.endIndex,
+                  text[index].isWhitespace {
+                index = text.index(after: index)
+            }
+
+            guard index < text.endIndex else { break }
+
+            let start = index
+            while index < text.endIndex,
+                  !text[index].isWhitespace {
+                index = text.index(after: index)
+            }
+
+            let range = start..<index
+            output.append(
+                TokenRange(
+                    text: String(text[range]),
+                    range: range
+                )
+            )
+        }
+
+        return output
+    }
+
+    private static func isLikelyIconArtifact(_ text: String) -> Bool {
+        let scalars = text.unicodeScalars
+        guard !scalars.isEmpty else { return false }
+
+        let letters = scalars.filter {
+            CharacterSet.letters.contains($0)
+        }.count
+        let digits = scalars.filter {
+            CharacterSet.decimalDigits.contains($0)
+        }.count
+        let punctuationOrSymbols = scalars.count - letters - digits
+
+        // 纯数字 / 符号，或最多只有一个字母并夹杂明显符号，
+        // 都是图标被 OCR 成字符时最常见的形态。
+        if letters == 0 {
+            return true
+        }
+
+        if letters <= 1,
+           scalars.count <= 6,
+           (digits > 0 || punctuationOrSymbols > 0) {
+            return true
+        }
+
+        // 单个 “I / l / p” 之类也可能来自图标；最终是否裁掉仍由
+        // 上面的几何间隔判断决定。
+        if letters == 1,
+           digits == 0,
+           scalars.count <= 2 {
+            return true
+        }
+
+        return false
     }
 
     private static func visionLanguage(for code: String) -> String? {
