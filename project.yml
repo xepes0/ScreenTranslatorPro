@@ -7,7 +7,7 @@ settings:
   base:
     SWIFT_VERSION: "5.10"
     MARKETING_VERSION: "0.2.0"
-    CURRENT_PROJECT_VERSION: "24"
+    CURRENT_PROJECT_VERSION: "25"
 targets:
   ScreenTranslatorPro:
     type: application
@@ -18,14 +18,12 @@ targets:
       - name: Generate selected app icon assets
         script: |
           set -e
-          PARTS_DIR="$SRCROOT/Assets"
-          ICON_SOURCE="$DERIVED_FILE_DIR/IconSource.jpg"
+          ICON_SOURCE="$SRCROOT/Assets/SelectedAppIcon.jpg"
           APPICON_DIR="$SRCROOT/ScreenTranslatorPro/MVP/Assets.xcassets/AppIcon.appiconset"
           LOGO_DIR="$SRCROOT/ScreenTranslatorPro/MVP/Assets.xcassets/AppLogo.imageset"
 
-          mkdir -p "$(dirname "$ICON_SOURCE")" "$APPICON_DIR" "$LOGO_DIR"
-
-          cat             "$PARTS_DIR/IconSource.b64.part00"             "$PARTS_DIR/IconSource.b64.part01"             "$PARTS_DIR/IconSource.b64.part02"             | /usr/bin/base64 -D > "$ICON_SOURCE"
+          test -f "$ICON_SOURCE"
+          mkdir -p "$APPICON_DIR" "$LOGO_DIR"
 
           /usr/bin/sips -z 1024 1024 -s format png "$ICON_SOURCE" --out "$APPICON_DIR/AppIcon.png" >/dev/null
           /usr/bin/sips -z 128 128 -s format png "$ICON_SOURCE" --out "$LOGO_DIR/AppLogo.png" >/dev/null

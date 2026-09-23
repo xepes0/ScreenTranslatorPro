@@ -18,6 +18,25 @@ struct SettingsView: View {
     @State private var showBaiduSecret = false
     @State private var showDeepLKey = false
     @State private var showOpenAIKey = false
+    @State private var editingSourceLanguage = false
+    @State private var editingTargetLanguage = false
+
+    private struct LanguageOption: Identifiable {
+        let code: String
+        let name: String
+        var id: String { code }
+    }
+
+    private let commonLanguages: [LanguageOption] = [
+        .init(code: "zh", name: "简体中文"),
+        .init(code: "cht", name: "繁体中文"),
+        .init(code: "en", name: "英语"),
+        .init(code: "ja", name: "日语"),
+        .init(code: "ko", name: "韩语"),
+        .init(code: "fr", name: "法语"),
+        .init(code: "de", name: "德语"),
+        .init(code: "es", name: "西班牙语")
+    ]
 
     private let accentBlue = Color(red: 0.13, green: 0.48, blue: 0.98)
     private let accentPurple = Color(red: 0.51, green: 0.30, blue: 0.98)
@@ -172,7 +191,11 @@ struct SettingsView: View {
                     title: "源语言",
                     subtitle: "识别截图中的原始语言"
                 ) {
-                    compactField("auto", text: $sourceLanguage)
+                    languageControl(
+                        text: $sourceLanguage,
+                        editing: $editingSourceLanguage,
+                        allowAuto: true
+                    )
                 }
 
                 separator
@@ -182,7 +205,11 @@ struct SettingsView: View {
                     title: "目标语言",
                     subtitle: "翻译为目标语言"
                 ) {
-                    compactField("zh", text: $targetLanguage)
+                    languageControl(
+                        text: $targetLanguage,
+                        editing: $editingTargetLanguage,
+                        allowAuto: false
+                    )
                 }
             }
         }
@@ -567,21 +594,56 @@ struct SettingsView: View {
         Divider().padding(.leading, 54)
     }
 
-    private func compactField(
-        _ placeholder: String,
-        text: Binding<String>
+    @ViewBuilder
+    private func languageControl(
+        text: Binding<String>,
+        editing: Binding<Bool>,
+        allowAuto: Bool
     ) -> some View {
-        TextField(placeholder, text: text)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .multilineTextAlignment(.trailing)
-            .font(.system(size: 14))
-            .padding(.horizontal, 12)
+        if editing.wrappedValue {
+            HStack(spacing: 6) {
+                TextField("语言代码", text: text)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.done)
+                    .onSubmit { editing.wrappedValue = false }
+
+                Button { editing.wrappedValue = false } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(accentBlue)
+                }
+                .buttonStyle(.plain)
+            }
+            .font(.system(size: 13))
+            .padding(.horizontal, 10)
             .frame(height: 38)
-            .background(
-                Color.black.opacity(0.035),
-                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
-            )
+            .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+        } else {
+            Menu {
+                if allowAuto {
+                    Button("自动识别") { text.wrappedValue = "auto" }
+                }
+                ForEach(commonLanguages) { option in
+                    Button(option.name) { text.wrappedValue = option.code }
+                }
+                Divider()
+                Button("自定义语言代码…") { editing.wrappedValue = true }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(languageName(for: text.wrappedValue))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption.weight(.semibold))
+                }
+                .font(.system(size: 14))
+                .foregroundStyle(.primary)
+            }
+        }
+    }
+
+    private func languageName(for code: String) -> String {
+        if code.lowercased() == "auto" { return "自动识别" }
+        return commonLanguages.first { $0.code == code.lowercased() }?.name ?? code
     }
 
     private func wideField(
@@ -664,7 +726,7 @@ struct SettingsView: View {
         ) as? String ?? "0.2.0"
         let build = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleVersion"
-        ) as? String ?? "24"
+        ) as? String ?? "25"
         return "Screen Translator Pro · v\(version)-beta\(build)"
     }
 
