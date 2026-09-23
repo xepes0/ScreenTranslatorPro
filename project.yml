@@ -23,6 +23,8 @@ targets:
           APPICON_DIR="$SRCROOT/ScreenTranslatorPro/MVP/Assets.xcassets/AppIcon.appiconset"
           LOGO_DIR="$SRCROOT/ScreenTranslatorPro/MVP/Assets.xcassets/AppLogo.imageset"
 
+          mkdir -p "$(dirname "$ICON_SOURCE")" "$APPICON_DIR" "$LOGO_DIR"
+
           cat             "$PARTS_DIR/IconSource.b64.part00"             "$PARTS_DIR/IconSource.b64.part01"             "$PARTS_DIR/IconSource.b64.part02"             | /usr/bin/base64 -D > "$ICON_SOURCE"
 
           /usr/bin/sips -z 1024 1024 -s format png "$ICON_SOURCE" --out "$APPICON_DIR/AppIcon.png" >/dev/null
