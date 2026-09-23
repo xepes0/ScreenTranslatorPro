@@ -951,7 +951,7 @@ private enum TranslationGuard {
             }
 
             let original = String(masked[swiftRange])
-            let placeholder = "ZXQSTP\\(index)QXZ"
+            let placeholder = "ZXQSTP" + String(index) + "QXZ"
             replacements[placeholder] = original
             masked.replaceSubrange(swiftRange, with: placeholder)
         }
