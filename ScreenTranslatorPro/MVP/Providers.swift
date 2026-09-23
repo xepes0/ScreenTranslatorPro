@@ -11,13 +11,26 @@ struct BaiduTextTranslator: TextTranslationProvider {
     let kind: ProviderKind = .baiduText
     let appID: String
     let secret: String
+    var requestTimeout: TimeInterval = 12
+    var maxAttempts: Int = 3
+
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        configuration.timeoutIntervalForResource = 16
+        configuration.httpMaximumConnectionsPerHost = 6
+        configuration.waitsForConnectivity = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
 
     func translate(text: String, source: String, target: String) async throws -> String {
         guard !appID.isEmpty else { throw ScreenTranslatorError.missingCredential("百度 APP ID") }
         guard !secret.isEmpty else { throw ScreenTranslatorError.missingCredential("百度密钥") }
 
         var lastError: Error?
-        for attempt in 0..<3 {
+        let attempts = max(1, maxAttempts)
+        for attempt in 0..<attempts {
             do {
                 let salt = String(UInt64.random(in: 100000...999999999))
                 let digest = Insecure.MD5.hash(data: Data((appID + text + salt + secret).utf8))
@@ -25,7 +38,7 @@ struct BaiduTextTranslator: TextTranslationProvider {
 
                 var request = URLRequest(url: URL(string: "https://fanyi-api.baidu.com/api/trans/vip/translate")!)
                 request.httpMethod = "POST"
-                request.timeoutInterval = 12
+                request.timeoutInterval = requestTimeout
                 request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
                 request.httpBody = formBody([
                     "q": text,
@@ -36,14 +49,14 @@ struct BaiduTextTranslator: TextTranslationProvider {
                     "sign": sign
                 ])
 
-                let (data, response) = try await URLSession.shared.data(for: request)
+                let (data, response) = try await Self.session.data(for: request)
                 guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                     throw ScreenTranslatorError.invalidResponse("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
                 }
 
                 let decoded = try JSONDecoder().decode(BaiduResponse.self, from: data)
                 if let code = decoded.errorCode {
-                    if (code == "54003" || code == "54005"), attempt < 2 {
+                    if (code == "54003" || code == "54005"), attempt < attempts - 1 {
                         try await Task.sleep(for: .milliseconds(450 * (attempt + 1)))
                         continue
                     }
@@ -57,7 +70,7 @@ struct BaiduTextTranslator: TextTranslationProvider {
                 return output
             } catch {
                 lastError = error
-                if attempt < 2 {
+                if attempt < attempts - 1 {
                     try await Task.sleep(for: .milliseconds(250 * (attempt + 1)))
                 }
             }
@@ -644,18 +657,83 @@ private extension Data {
 private actor TranslationMemory {
     static let shared = TranslationMemory()
 
-    private var values: [String: String] = [:]
-    private let maxEntries = 500
+    private struct Snapshot: Codable {
+        var values: [String: String]
+        var order: [String]
+    }
+
+    private var values: [String: String]
+    private var order: [String]
+    private let maxEntries = 1_200
+    private var saveTask: Task<Void, Never>?
+
+    private static var fileURL: URL {
+        let base = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        )[0]
+        let directory = base.appendingPathComponent(
+            "ScreenTranslatorPro",
+            isDirectory: true
+        )
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        return directory.appendingPathComponent("translation-memory-v1.json")
+    }
+
+    init() {
+        if
+            let data = try? Data(contentsOf: Self.fileURL),
+            let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
+        {
+            values = snapshot.values
+            order = snapshot.order.filter { snapshot.values[$0] != nil }
+        } else {
+            values = [:]
+            order = []
+        }
+    }
 
     func value(for key: String) -> String? {
-        values[key]
+        guard let value = values[key] else { return nil }
+        touch(key)
+        return value
     }
 
     func store(_ value: String, for key: String) {
-        if values.count >= maxEntries, let first = values.keys.first {
-            values.removeValue(forKey: first)
-        }
         values[key] = value
+        touch(key)
+
+        while order.count > maxEntries {
+            let oldest = order.removeFirst()
+            values.removeValue(forKey: oldest)
+        }
+
+        scheduleSave()
+    }
+
+    private func touch(_ key: String) {
+        if let index = order.firstIndex(of: key) {
+            order.remove(at: index)
+        }
+        order.append(key)
+    }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .milliseconds(650))
+            guard !Task.isCancelled else { return }
+            await self.flush()
+        }
+    }
+
+    private func flush() {
+        let snapshot = Snapshot(values: values, order: order)
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        try? data.write(to: Self.fileURL, options: .atomic)
     }
 }
 
@@ -1005,39 +1083,57 @@ final class TranslationService: Sendable {
 
         let provider = try makeProvider(kind)
 
-        // 先把不该翻译的 UI/技术文本直接锁定为原文。
-        // OverlayRenderer 会看到 source == translation，从而完全不擦除它们。
         var output = Array<OCRResult?>(repeating: nil, count: items.count)
-        var work: [(
+        var pending: [(
             offset: Int,
             element: OCRResult,
-            protected: TranslationGuard.ProtectedText
+            protected: TranslationGuard.ProtectedText,
+            key: String
         )] = []
-        work.reserveCapacity(items.count)
+        pending.reserveCapacity(items.count)
 
+        // 先做保护和持久缓存命中。重复页面通常只剩 OCR + 渲染，
+        // 不再重复等待远端 API。
         for (index, item) in items.enumerated() {
             if TranslationGuard.shouldPreserve(item) {
                 var copy = item
                 copy.translation = item.text
                 output[index] = copy
-            } else {
-                work.append((
-                    index,
-                    item,
-                    TranslationGuard.protectInlineTechnicalContent(item.text)
-                ))
+                continue
             }
+
+            let key = cacheKey(
+                kind: kind,
+                source: source,
+                target: target,
+                text: item.text
+            )
+
+            if let cached = await TranslationMemory.shared.value(for: key) {
+                var copy = item
+                copy.translation = cached
+                output[index] = copy
+                continue
+            }
+
+            pending.append((
+                index,
+                item,
+                TranslationGuard.protectInlineTechnicalContent(item.text),
+                key
+            ))
         }
 
-        guard !work.isEmpty else {
+        guard !pending.isEmpty else {
             return output.compactMap { $0 }
         }
 
+        // 百度快速模式优先一次批量请求；失败或返回行数不一致时，
+        // 自动降级到下面的逐项并发，不中断整张截图。
         if kind == .baiduFast,
            let baidu = provider as? BaiduTextTranslator {
-            let joined = work.map { $0.protected.masked }.joined(separator: "\n")
+            let joined = pending.map { $0.protected.masked }.joined(separator: "\n")
 
-            // 只把真正需要翻译的文本做批量请求。
             if joined.utf8.count <= 5_500 {
                 do {
                     let batch = try await baidu.translate(
@@ -1050,59 +1146,76 @@ final class TranslationService: Sendable {
                         omittingEmptySubsequences: false
                     ).map(String.init)
 
-                    if lines.count == work.count {
-                        for ((entry, value)) in zip(work, lines) {
+                    if lines.count == pending.count {
+                        for (entry, value) in zip(pending, lines) {
+                            let restored = entry.protected.restore(value)
                             var copy = entry.element
-                            copy.translation = entry.protected.restore(value)
+                            copy.translation = restored
                             output[entry.offset] = copy
+                            await TranslationMemory.shared.store(
+                                restored,
+                                for: entry.key
+                            )
                         }
                         return output.compactMap { $0 }
                     }
                 } catch {
-                    // 批量失败时自动回退到下面的并发逐条翻译。
+                    print("[STP] fast batch failed, falling back per item: \(error)")
                 }
             }
         }
 
         if kind == .baiduText {
-            for (position, entry) in work.enumerated() {
-                output[entry.offset] = try await translateOne(
-                    entry.element,
-                    provider: provider,
-                    kind: kind,
-                    source: source,
-                    target: target
-                )
+            for (position, entry) in pending.enumerated() {
+                do {
+                    output[entry.offset] = try await translateOne(
+                        entry.element,
+                        provider: provider,
+                        kind: kind,
+                        source: source,
+                        target: target
+                    )
+                } catch {
+                    if isFatal(error) { throw error }
+                    output[entry.offset] = untranslated(entry.element)
+                    print("[STP] item translation skipped after error: \(error)")
+                }
 
-                if position < work.count - 1 {
+                if position < pending.count - 1 {
                     try await Task.sleep(for: .milliseconds(1050))
                 }
             }
             return output.compactMap { $0 }
         }
 
-        // 快速模式允许最多 4 条并发；被过滤掉的状态栏/技术文本不占 API 请求。
+        // 其它快速 Provider 最多 4 项并发。
+        // 单项失败只保留该项原文，其余翻译继续完成。
         let chunkSize = 4
 
-        for chunkStart in stride(from: 0, to: work.count, by: chunkSize) {
-            let end = min(chunkStart + chunkSize, work.count)
-            let chunk = Array(work[chunkStart..<end])
+        for chunkStart in stride(from: 0, to: pending.count, by: chunkSize) {
+            let end = min(chunkStart + chunkSize, pending.count)
+            let chunk = Array(pending[chunkStart..<end])
 
-            try await withThrowingTaskGroup(of: (Int, OCRResult).self) { group in
+            await withTaskGroup(of: (Int, OCRResult).self) { group in
                 for entry in chunk {
                     group.addTask {
-                        let result = try await self.translateOne(
-                            entry.element,
-                            provider: provider,
-                            kind: kind,
-                            source: source,
-                            target: target
-                        )
-                        return (entry.offset, result)
+                        do {
+                            let result = try await self.translateOne(
+                                entry.element,
+                                provider: provider,
+                                kind: kind,
+                                source: source,
+                                target: target
+                            )
+                            return (entry.offset, result)
+                        } catch {
+                            print("[STP] item translation failed, preserving source: \(error)")
+                            return (entry.offset, self.untranslated(entry.element))
+                        }
                     }
                 }
 
-                for try await (index, result) in group {
+                for await (index, result) in group {
                     output[index] = result
                 }
             }
@@ -1118,7 +1231,12 @@ final class TranslationService: Sendable {
         source: String,
         target: String
     ) async throws -> OCRResult {
-        let key = [kind.rawValue, source, target, item.text].joined(separator: "\u{001F}")
+        let key = cacheKey(
+            kind: kind,
+            source: source,
+            target: target,
+            text: item.text
+        )
 
         if let cached = await TranslationMemory.shared.value(for: key) {
             var copy = item
@@ -1127,7 +1245,6 @@ final class TranslationService: Sendable {
         }
 
         let protected = TranslationGuard.protectInlineTechnicalContent(item.text)
-
         let translated = try await provider.translate(
             text: protected.masked,
             source: source,
@@ -1141,15 +1258,46 @@ final class TranslationService: Sendable {
         return copy
     }
 
+    private func cacheKey(
+        kind: ProviderKind,
+        source: String,
+        target: String,
+        text: String
+    ) -> String {
+        [kind.rawValue, source, target, text].joined(separator: "\u{001F}")
+    }
+
+    private func untranslated(_ item: OCRResult) -> OCRResult {
+        var copy = item
+        copy.translation = item.text
+        return copy
+    }
+
+    private func isFatal(_ error: Error) -> Bool {
+        guard let value = error as? ScreenTranslatorError else { return false }
+        if case .missingCredential = value { return true }
+        return false
+    }
+
     private func makeProvider(_ kind: ProviderKind) throws -> any TextTranslationProvider {
         switch kind {
         case .localOCR:
             throw ScreenTranslatorError.invalidResponse("本地 OCR 不需要远程 Provider")
 
-        case .baiduFast, .baiduText:
+        case .baiduFast:
             return BaiduTextTranslator(
                 appID: AppConfiguration.baiduAppID,
-                secret: SecretStore.shared.read(.baiduSecret) ?? ""
+                secret: SecretStore.shared.read(.baiduSecret) ?? "",
+                requestTimeout: 7,
+                maxAttempts: 2
+            )
+
+        case .baiduText:
+            return BaiduTextTranslator(
+                appID: AppConfiguration.baiduAppID,
+                secret: SecretStore.shared.read(.baiduSecret) ?? "",
+                requestTimeout: 12,
+                maxAttempts: 3
             )
 
         case .baiduImageOpen:
