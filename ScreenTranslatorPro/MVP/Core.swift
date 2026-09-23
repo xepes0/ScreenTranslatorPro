@@ -1588,36 +1588,91 @@ final class ScreenTranslationEngine {
     private let renderer = OverlayRenderer()
 
     func process(image: UIImage) async throws -> ScreenTranslationResult {
+        let started = CFAbsoluteTimeGetCurrent()
         let source = AppConfiguration.sourceLanguage
         let target = AppConfiguration.targetLanguage
+        let providerKind = AppConfiguration.provider
 
-        if AppConfiguration.provider == .baiduImageOpen {
+        if providerKind == .baiduImageOpen {
             let provider = BaiduOpenPlatformImageTranslator(
                 appID: AppConfiguration.baiduAppID,
                 secret: SecretStore.shared.read(.baiduSecret) ?? ""
             )
-            let output = try await provider.translate(image: image, source: source, target: target)
+            let apiStarted = CFAbsoluteTimeGetCurrent()
+            let output = try await provider.translate(
+                image: image,
+                source: source,
+                target: target
+            )
+            logTiming(
+                "image-api",
+                from: apiStarted,
+                extra: "provider=baiduImageOpen"
+            )
+            logTiming("total", from: started)
             return ScreenTranslationResult(image: output, items: [])
         }
 
+        let ocrStarted = CFAbsoluteTimeGetCurrent()
         let found = try await ocr.recognize(
             image: image,
             sourceLanguage: source,
-            fast: AppConfiguration.provider == .baiduFast
+            fast: providerKind == .baiduFast
+        )
+        logTiming(
+            "ocr",
+            from: ocrStarted,
+            extra: "items=\(found.count)"
         )
         guard !found.isEmpty else { throw ScreenTranslatorError.noTextFound }
 
+        let layoutStarted = CFAbsoluteTimeGetCurrent()
         let layoutItems = grouper.prepare(found)
+        logTiming(
+            "layout",
+            from: layoutStarted,
+            extra: "items=\(layoutItems.count)"
+        )
+
+        let translateStarted = CFAbsoluteTimeGetCurrent()
         let translated = try await service.translate(
             layoutItems,
             source: source,
             target: target
         )
+        logTiming(
+            "translate",
+            from: translateStarted,
+            extra: "provider=\(providerKind.rawValue), items=\(translated.count)"
+        )
 
-        return ScreenTranslationResult(
-            image: renderer.render(original: image, items: translated),
+        let renderStarted = CFAbsoluteTimeGetCurrent()
+        let rendered = renderer.render(
+            original: image,
             items: translated
         )
+        logTiming("render", from: renderStarted)
+        logTiming("total", from: started)
+
+        return ScreenTranslationResult(
+            image: rendered,
+            items: translated
+        )
+    }
+
+    private func logTiming(
+        _ phase: String,
+        from start: CFAbsoluteTime,
+        extra: String? = nil
+    ) {
+        let milliseconds = Int(
+            ((CFAbsoluteTimeGetCurrent() - start) * 1_000).rounded()
+        )
+        if let extra {
+            print("[STP] \(phase)=\(milliseconds)ms, \(extra)")
+        } else {
+            print("[STP] \(phase)=\(milliseconds)ms")
+        }
     }
 }
 
