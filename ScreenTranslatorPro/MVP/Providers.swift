@@ -750,7 +750,7 @@ private enum TranslationGuard {
             // Unix / home path
             "(?<![A-Za-z0-9])(?:~?/)(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+",
             // Windows path
-            "(?<![A-Za-z0-9])[A-Za-z]:[\\\\/](?:[^\\s<>:\\"|?*]+[\\\\/]?)+",
+            "(?<![A-Za-z0-9])[A-Za-z]:[\\\\/](?:[^\\s<>:|?*]+[\\\\/]?)+",
             // Version / hex
             "(?<![A-Za-z0-9])[vV]?\\d+(?:\\.\\d+){1,4}(?:[-+][A-Za-z0-9._-]+)?(?![A-Za-z0-9])",
             "(?<![A-Za-z0-9])0x[0-9A-Fa-f]+(?![A-Za-z0-9])",
@@ -772,7 +772,7 @@ private enum TranslationGuard {
             .joined(separator: "|")
 
         return try! NSRegularExpression(
-            pattern: "(?<![A-Za-z0-9])(?:\\(body))(?![A-Za-z0-9])",
+            pattern: "(?<![A-Za-z0-9])(?:" + body + ")(?![A-Za-z0-9])",
             options: [.caseInsensitive]
         )
     }()
@@ -1008,7 +1008,11 @@ final class TranslationService: Sendable {
         // 先把不该翻译的 UI/技术文本直接锁定为原文。
         // OverlayRenderer 会看到 source == translation，从而完全不擦除它们。
         var output = Array<OCRResult?>(repeating: nil, count: items.count)
-        var work: [(offset: Int, element: OCRResult)] = []
+        var work: [(
+            offset: Int,
+            element: OCRResult,
+            protected: TranslationGuard.ProtectedText
+        )] = []
         work.reserveCapacity(items.count)
 
         for (index, item) in items.enumerated() {
@@ -1017,7 +1021,11 @@ final class TranslationService: Sendable {
                 copy.translation = item.text
                 output[index] = copy
             } else {
-                work.append((index, item))
+                work.append((
+                    index,
+                    item,
+                    TranslationGuard.protectInlineTechnicalContent(item.text)
+                ))
             }
         }
 
@@ -1027,8 +1035,7 @@ final class TranslationService: Sendable {
 
         if kind == .baiduFast,
            let baidu = provider as? BaiduTextTranslator {
-            let workItems = work.map(\.element)
-            let joined = workItems.map(\.text).joined(separator: "\n")
+            let joined = work.map { $0.protected.masked }.joined(separator: "\n")
 
             // 只把真正需要翻译的文本做批量请求。
             if joined.utf8.count <= 5_500 {
@@ -1046,7 +1053,7 @@ final class TranslationService: Sendable {
                     if lines.count == work.count {
                         for ((entry, value)) in zip(work, lines) {
                             var copy = entry.element
-                            copy.translation = value
+                            copy.translation = entry.protected.restore(value)
                             output[entry.offset] = copy
                         }
                         return output.compactMap { $0 }
@@ -1119,11 +1126,14 @@ final class TranslationService: Sendable {
             return copy
         }
 
-        let value = try await provider.translate(
-            text: item.text,
+        let protected = TranslationGuard.protectInlineTechnicalContent(item.text)
+
+        let translated = try await provider.translate(
+            text: protected.masked,
             source: source,
             target: target
         )
+        let value = protected.restore(translated)
         await TranslationMemory.shared.store(value, for: key)
 
         var copy = item
