@@ -659,6 +659,108 @@ private actor TranslationMemory {
     }
 }
 
+private enum TranslationGuard {
+    private static let technicalAcronyms: Set<String> = [
+        "AI", "API", "ASCII", "CJK", "CPU", "DNS", "GPU", "HTTP", "HTTPS",
+        "ID", "IP", "JSON", "NFC", "OCR", "RAM", "RGB", "SIM", "SSH",
+        "TCP", "TLS", "UDP", "UI", "URL", "USB", "UUID", "VPN", "WiFi",
+        "XML"
+    ]
+
+    static func shouldPreserve(_ item: OCRResult) -> Bool {
+        let text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return true }
+
+        // iPhone 状态栏处于截图最顶部。时间、电量、运营商等不应送去翻译，
+        // 否则 OCR 偶尔会把 08:31 识别为 8.314 一类文本。
+        if item.boundingBox.midY > 0.962 {
+            return true
+        }
+
+        // 没有字母的纯数字、时间、百分比、符号本身无需翻译。
+        if text.rangeOfCharacter(from: .letters) == nil {
+            return true
+        }
+
+        // 字体预览常见的 Aa 是视觉样例，不是自然语言。
+        if text == "Aa" || text == "AA" || text == "aA" {
+            return true
+        }
+
+        let compact = text.replacingOccurrences(of: " ", with: "")
+        if technicalAcronyms.contains(compact) {
+            return true
+        }
+
+        // 短大写缩写：SSH / CJK / CPU / ID 等。
+        if compact.count >= 2,
+           compact.count <= 5,
+           compact.unicodeScalars.allSatisfy({
+               CharacterSet.uppercaseLetters.contains($0) ||
+               CharacterSet.decimalDigits.contains($0)
+           }) {
+            return true
+        }
+
+        // URL、邮箱、文件路径、Bundle ID / 域名。
+        if text.contains("://") ||
+           text.contains("@") ||
+           text.hasPrefix("/") ||
+           text.hasPrefix("~/") ||
+           text.range(
+               of: #"^[A-Za-z]:\\",
+               options: .regularExpression
+           ) != nil ||
+           text.range(
+               of: #"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$"#,
+               options: .regularExpression
+           ) != nil {
+            return true
+        }
+
+        // IPv4 / IPv6 / MAC / 端口形式。
+        if text.range(
+            of: #"^(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?$"#,
+            options: .regularExpression
+        ) != nil ||
+        (text.contains(":") &&
+         text.range(of: #"^[0-9A-Fa-f:]+$"#, options: .regularExpression) != nil) {
+            return true
+        }
+
+        // 版本号、十六进制、技术型单 token，例如：
+        // v1.2.3 / 0x1234 / xterm-256color / arm64-v8a。
+        if text.range(
+            of: #"^[vV]?\d+(?:\.\d+){1,4}(?:[-+][A-Za-z0-9._-]+)?$"#,
+            options: .regularExpression
+        ) != nil ||
+        text.range(
+            of: #"^0x[0-9A-Fa-f]+$"#,
+            options: .regularExpression
+        ) != nil {
+            return true
+        }
+
+        if !text.contains(" "),
+           text.rangeOfCharacter(from: .decimalDigits) != nil,
+           text.rangeOfCharacter(from: CharacterSet(charactersIn: "-_./:")) != nil {
+            return true
+        }
+
+        // 常见命令行/代码片段不做自然语言翻译。
+        if text.hasPrefix("$ ") ||
+           text.hasPrefix("# ") ||
+           text.contains("::") ||
+           text.contains("->") ||
+           text.contains("=>") ||
+           text.contains("--") {
+            return true
+        }
+
+        return false
+    }
+}
+
 final class TranslationService: Sendable {
     func translate(_ items: [OCRResult], source: String, target: String) async throws -> [OCRResult] {
         guard !items.isEmpty else { throw ScreenTranslatorError.noTextFound }
@@ -678,11 +780,32 @@ final class TranslationService: Sendable {
 
         let provider = try makeProvider(kind)
 
+        // 先把不该翻译的 UI/技术文本直接锁定为原文。
+        // OverlayRenderer 会看到 source == translation，从而完全不擦除它们。
+        var output = Array<OCRResult?>(repeating: nil, count: items.count)
+        var work: [(offset: Int, element: OCRResult)] = []
+        work.reserveCapacity(items.count)
+
+        for (index, item) in items.enumerated() {
+            if TranslationGuard.shouldPreserve(item) {
+                var copy = item
+                copy.translation = item.text
+                output[index] = copy
+            } else {
+                work.append((index, item))
+            }
+        }
+
+        guard !work.isEmpty else {
+            return output.compactMap { $0 }
+        }
+
         if kind == .baiduFast,
            let baidu = provider as? BaiduTextTranslator {
-            let joined = items.map(\.text).joined(separator: "\n")
+            let workItems = work.map(\.element)
+            let joined = workItems.map(\.text).joined(separator: "\n")
 
-            // 大多数屏幕文字一次请求即可完成，网络往返从 N 次降到 1 次。
+            // 只把真正需要翻译的文本做批量请求。
             if joined.utf8.count <= 5_500 {
                 do {
                     let batch = try await baidu.translate(
@@ -695,12 +818,13 @@ final class TranslationService: Sendable {
                         omittingEmptySubsequences: false
                     ).map(String.init)
 
-                    if lines.count == items.count {
-                        return zip(items, lines).map { item, value in
-                            var copy = item
+                    if lines.count == work.count {
+                        for ((entry, value)) in zip(work, lines) {
+                            var copy = entry.element
                             copy.translation = value
-                            return copy
+                            output[entry.offset] = copy
                         }
+                        return output.compactMap { $0 }
                     }
                 } catch {
                     // 批量失败时自动回退到下面的并发逐条翻译。
@@ -709,56 +833,50 @@ final class TranslationService: Sendable {
         }
 
         if kind == .baiduText {
-            var output: [OCRResult] = []
-            output.reserveCapacity(items.count)
-
-            for (index, item) in items.enumerated() {
-                output.append(try await translateOne(
-                    item,
+            for (position, entry) in work.enumerated() {
+                output[entry.offset] = try await translateOne(
+                    entry.element,
                     provider: provider,
                     kind: kind,
                     source: source,
                     target: target
-                ))
+                )
 
-                if index < items.count - 1 {
+                if position < work.count - 1 {
                     try await Task.sleep(for: .milliseconds(1050))
                 }
             }
-            return output
+            return output.compactMap { $0 }
         }
 
-        // 快速模式允许最多 4 条并发；如果账号触发百度频控，
-        // BaiduTextTranslator 会自动短暂退避并重试。
-        var translated = Array<OCRResult?>(repeating: nil, count: items.count)
-        let indexed = Array(items.enumerated())
-        let chunkSize = kind == .baiduFast ? 4 : 4
+        // 快速模式允许最多 4 条并发；被过滤掉的状态栏/技术文本不占 API 请求。
+        let chunkSize = 4
 
-        for chunkStart in stride(from: 0, to: indexed.count, by: chunkSize) {
-            let end = min(chunkStart + chunkSize, indexed.count)
-            let chunk = Array(indexed[chunkStart..<end])
+        for chunkStart in stride(from: 0, to: work.count, by: chunkSize) {
+            let end = min(chunkStart + chunkSize, work.count)
+            let chunk = Array(work[chunkStart..<end])
 
             try await withThrowingTaskGroup(of: (Int, OCRResult).self) { group in
-                for (index, item) in chunk {
+                for entry in chunk {
                     group.addTask {
                         let result = try await self.translateOne(
-                            item,
+                            entry.element,
                             provider: provider,
                             kind: kind,
                             source: source,
                             target: target
                         )
-                        return (index, result)
+                        return (entry.offset, result)
                     }
                 }
 
                 for try await (index, result) in group {
-                    translated[index] = result
+                    output[index] = result
                 }
             }
         }
 
-        return translated.compactMap { $0 }
+        return output.compactMap { $0 }
     }
 
     private func translateOne(
