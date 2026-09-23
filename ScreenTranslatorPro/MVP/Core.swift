@@ -227,9 +227,20 @@ struct TextLayoutGrouper {
     }
 
     private func bestLineIndex(for item: OCRResult, in lines: [Line]) -> Int? {
+        // 图标很容易被 Vision OCR 误认成 “151”、圆点、括号等短字符。
+        // 这类无字母 token 必须保持独立，不能在 beta19 的行合并阶段
+        // 拼到右侧菜单文字里，否则会出现 “151启动串行连接” 之类结果。
+        guard containsLetterLikeCharacter(item.text) else {
+            return nil
+        }
+
         var best: (index: Int, score: CGFloat)?
 
         for (index, line) in lines.enumerated() {
+            // 已经判定为数字/符号/图标伪字符的独立行也不允许吸附正文。
+            guard line.items.contains(where: { containsLetterLikeCharacter($0.text) }) else {
+                continue
+            }
             let box = line.boundingBox
             let minHeight = max(0.0001, min(box.height, item.boundingBox.height))
             let maxHeight = max(box.height, item.boundingBox.height)
@@ -400,6 +411,12 @@ struct TextLayoutGrouper {
         }
 
         return true
+    }
+
+    private func containsLetterLikeCharacter(_ text: String) -> Bool {
+        text.unicodeScalars.contains {
+            CharacterSet.letters.contains($0)
+        }
     }
 
     private func proseScore(_ text: String) -> Int {
