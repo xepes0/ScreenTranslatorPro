@@ -220,6 +220,14 @@ final class OverlayRenderer {
                     background: estimate.center
                 ) ?? (estimate.center.isDark ? .white : .black)
 
+                let fontWeight = estimatedFontWeight(
+                    in: original,
+                    textRect: rect,
+                    background: estimate.center,
+                    foreground: foreground,
+                    imageSize: original.size
+                )
+
                 eraseBackground(
                     in: rendererContext.cgContext,
                     rect: eraseRect,
@@ -232,7 +240,8 @@ final class OverlayRenderer {
                     in: rect,
                     eraseRect: eraseRect,
                     imageSize: original.size,
-                    foreground: foreground
+                    foreground: foreground,
+                    weight: fontWeight
                 )
             }
         }
@@ -417,7 +426,8 @@ final class OverlayRenderer {
         in originalRect: CGRect,
         eraseRect: CGRect,
         imageSize: CGSize,
-        foreground: UIColor
+        foreground: UIColor,
+        weight: UIFont.Weight
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -432,7 +442,8 @@ final class OverlayRenderer {
             originalRect: originalRect,
             availableWidth: drawWidth,
             imageSize: imageSize,
-            singleLine: isSingleLine
+            singleLine: isSingleLine,
+            weight: weight
         )
 
         let paragraph = NSMutableParagraphStyle()
@@ -528,10 +539,10 @@ final class OverlayRenderer {
         originalRect: CGRect,
         availableWidth: CGFloat,
         imageSize: CGSize,
-        singleLine: Bool
+        singleLine: Bool,
+        weight: UIFont.Weight
     ) -> UIFont {
         let isLargeTitle = originalRect.height > imageSize.height * 0.028
-        let weight: UIFont.Weight = isLargeTitle ? .semibold : .regular
 
         // beta15：先用“原文实际宽度”反推原字体大小，再用同样字号绘制译文。
         // 这样不会再单纯依赖 OCR 高度而把中文缩得过小。
@@ -670,6 +681,157 @@ final class OverlayRenderer {
         // 宽度估算与 OCR 高度互相校正，避免极短词导致估算失真。
         let heightReference = originalRect.height * 1.18
         return max(low, heightReference)
+    }
+
+    private func estimatedFontWeight(
+        in image: UIImage,
+        textRect: CGRect,
+        background: UIColor,
+        foreground: UIColor,
+        imageSize: CGSize
+    ) -> UIFont.Weight {
+        guard
+            let cg = image.cgImage,
+            let bg = background.rgbaComponents,
+            let fg = foreground.rgbaComponents
+        else {
+            return textRect.height > imageSize.height * 0.028 ? .semibold : .regular
+        }
+
+        let imageBounds = CGRect(
+            x: 0,
+            y: 0,
+            width: image.size.width,
+            height: image.size.height
+        )
+
+        let sampleRect = textRect
+            .insetBy(dx: max(0.25, textRect.height * 0.02),
+                     dy: max(0.15, textRect.height * 0.015))
+            .intersection(imageBounds)
+
+        guard sampleRect.width >= 2, sampleRect.height >= 2 else {
+            return textRect.height > imageSize.height * 0.028 ? .semibold : .regular
+        }
+
+        let sx = CGFloat(cg.width) / image.size.width
+        let sy = CGFloat(cg.height) / image.size.height
+        let pixelRect = CGRect(
+            x: sampleRect.minX * sx,
+            y: (image.size.height - sampleRect.maxY) * sy,
+            width: sampleRect.width * sx,
+            height: sampleRect.height * sy
+        ).integral
+
+        guard pixelRect.width >= 2, pixelRect.height >= 2 else {
+            return textRect.height > imageSize.height * 0.028 ? .semibold : .regular
+        }
+
+        let input = CIImage(cgImage: cg).cropped(to: pixelRect)
+        let translated = input.transformed(
+            by: CGAffineTransform(
+                translationX: -pixelRect.minX,
+                y: -pixelRect.minY
+            )
+        )
+
+        let sampleWidth = 42
+        let aspect = max(0.12, pixelRect.height / pixelRect.width)
+        let sampleHeight = max(8, min(24, Int(CGFloat(sampleWidth) * aspect)))
+        let scaled = translated.transformed(
+            by: CGAffineTransform(
+                scaleX: CGFloat(sampleWidth) / pixelRect.width,
+                y: CGFloat(sampleHeight) / pixelRect.height
+            )
+        )
+
+        var bitmap = [UInt8](
+            repeating: 0,
+            count: sampleWidth * sampleHeight * 4
+        )
+
+        ciContext.render(
+            scaled,
+            toBitmap: &bitmap,
+            rowBytes: sampleWidth * 4,
+            bounds: CGRect(
+                x: 0,
+                y: 0,
+                width: sampleWidth,
+                height: sampleHeight
+            ),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+
+        let axisR = fg.0 - bg.0
+        let axisG = fg.1 - bg.1
+        let axisB = fg.2 - bg.2
+        let axisLengthSquared =
+            axisR * axisR +
+            axisG * axisG +
+            axisB * axisB
+
+        guard axisLengthSquared > 0.008 else {
+            return textRect.height > imageSize.height * 0.028 ? .semibold : .regular
+        }
+
+        var inkSum: CGFloat = 0
+        var strongCount: CGFloat = 0
+        var validCount: CGFloat = 0
+
+        for index in stride(from: 0, to: bitmap.count, by: 4) {
+            let a = CGFloat(bitmap[index + 3]) / 255
+            guard a > 0.65 else { continue }
+
+            let r = CGFloat(bitmap[index]) / 255
+            let g = CGFloat(bitmap[index + 1]) / 255
+            let b = CGFloat(bitmap[index + 2]) / 255
+
+            let pr = r - bg.0
+            let pg = g - bg.1
+            let pb = b - bg.2
+
+            var projection =
+                (pr * axisR + pg * axisG + pb * axisB) /
+                axisLengthSquared
+
+            projection = min(1, max(0, projection))
+            validCount += 1
+            inkSum += projection
+
+            if projection >= 0.52 {
+                strongCount += 1
+            }
+        }
+
+        guard validCount > 0 else {
+            return textRect.height > imageSize.height * 0.028 ? .semibold : .regular
+        }
+
+        let meanInk = inkSum / validCount
+        let strongCoverage = strongCount / validCount
+        let densityScore = meanInk * 0.62 + strongCoverage * 0.38
+
+        let isLargeTitle = textRect.height > imageSize.height * 0.028
+        let isSmallLabel = textRect.height < imageSize.height * 0.015
+
+        if isLargeTitle {
+            if densityScore >= 0.24 { return .bold }
+            return .semibold
+        }
+
+        if densityScore >= 0.235 {
+            return .bold
+        } else if densityScore >= 0.175 {
+            return .semibold
+        } else if densityScore >= 0.125 {
+            return .medium
+        } else if isSmallLabel && densityScore >= 0.10 {
+            return .medium
+        } else {
+            return .regular
+        }
     }
 
     private func estimatedForegroundColor(
