@@ -6,7 +6,7 @@
 - 删除未使用的 SpringBoardServices / LSApplicationWorkspace 私有 API 代码，保留系统「快速查看」流程。
 - 增加 `PrivacyInfo.xcprivacy`，说明 App 内 `UserDefaults` 的用途。
 - 设置页提供第三方翻译数据发送说明、逐服务授权、隐私政策链接和清除本机数据入口；未授权时 App 与快捷指令均阻止远程翻译请求。
-- 构建号为 `1.0.0 (2)`，CI 核对显示名称、版本和隐私清单。
+- 版本为 `1.0.1 (2)`，CI 核对显示名称、版本和隐私清单。
 
 ## 提交前仍需完成
 
@@ -18,4 +18,4 @@
 
 ## 现有发布说明
 
-GitHub `v1.0.0` Release 中的 Build 1 是更名前的未签名版本。本次中文名称与隐私改动从 Build 2 开始，不应将 Build 1 当作待提交 App Store 的二进制。
+GitHub `v1.0.0` Release 中的 Build 1 是更名前的未签名版本。中文名称与隐私改动从 `v1.0.1` Build 2 开始；两个 GitHub 产物都不是可直接提交 App Store 的签名包。
