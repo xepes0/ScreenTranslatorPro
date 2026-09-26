@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: screen-translator-v1.0.0
+  group: screen-translator-v1.0.1
   cancel-in-progress: false
 
 jobs:
@@ -25,11 +25,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v1.0.0 --json assets --jq '.assets[].name' > /tmp/stp-release-assets 2>/dev/null; then
-            if grep -qx 'ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa' /tmp/stp-release-assets; then
+          if gh release view v1.0.1 --json assets --jq '.assets[].name' > /tmp/stp-release-assets 2>/dev/null; then
+            if grep -qx 'ScreenTranslatorPro-v1.0.1-build2-unsigned.ipa' /tmp/stp-release-assets; then
               echo 'published=true' >> "$GITHUB_OUTPUT"
             else
-              echo 'v1.0.0 release exists without the expected IPA asset.' >&2
+              echo 'v1.0.1 release exists without the expected IPA asset.' >&2
               exit 1
             fi
           else
@@ -66,23 +66,26 @@ jobs:
           APP_PATH='DerivedData/Build/Products/Release-iphoneos/ScreenTranslatorPro.app'
           test -d "$APP_PATH"
           INFO_PLIST="$APP_PATH/Info.plist"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")" = '1.0.0'
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO_PLIST")" = '1'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")" = '1.0.1'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO_PLIST")" = '2'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")" = 'com.xepes.ScreenTranslatorPro'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$INFO_PLIST")" = '屏幕翻译'
+          test -f "$APP_PATH/PrivacyInfo.xcprivacy"
+          plutil -lint "$APP_PATH/PrivacyInfo.xcprivacy"
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          ditto -c -k --sequesterRsrc --keepParent Payload ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa
-          unzip -t ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa >/dev/null
-          shasum -a 256 ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa > ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa.sha256
+          ditto -c -k --sequesterRsrc --keepParent Payload ScreenTranslatorPro-v1.0.1-build2-unsigned.ipa
+          unzip -t ScreenTranslatorPro-v1.0.1-build2-unsigned.ipa >/dev/null
+          shasum -a 256 ScreenTranslatorPro-v1.0.1-build2-unsigned.ipa > ScreenTranslatorPro-v1.0.1-build2-unsigned.ipa.sha256
 
-      - name: Publish v1.0.0
+      - name: Publish v1.0.1
         if: steps.existing.outputs.published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.0 \
-            ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa \
-            ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa.sha256 \
+          gh release create v1.0.1 \
+            ScreenTranslatorPro-v1.0.1-build2-unsigned.ipa \
+            ScreenTranslatorPro-v1.0.1-build2-unsigned.ipa.sha256 \
             --target "$GITHUB_SHA" \
-            --title 'Screen Translator Pro v1.0.0 (Build 1)' \
-            --notes-file docs/releases/v1.0.0.md
+            --title '屏幕翻译 v1.0.1 (Build 2)' \
+            --notes-file docs/releases/v1.0.1.md
