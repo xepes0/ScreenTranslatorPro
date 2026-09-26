@@ -1,0 +1,88 @@
+name: Release IPA
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screen-translator-v1.0.0
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check existing release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v1.0.0 --json assets --jq '.assets[].name' > /tmp/stp-release-assets 2>/dev/null; then
+            if grep -qx 'ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa' /tmp/stp-release-assets; then
+              echo 'published=true' >> "$GITHUB_OUTPUT"
+            else
+              echo 'v1.0.0 release exists without the expected IPA asset.' >&2
+              exit 1
+            fi
+          else
+            echo 'published=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install XcodeGen
+        if: steps.existing.outputs.published != 'true'
+        run: brew install xcodegen
+
+      - name: Generate project
+        if: steps.existing.outputs.published != 'true'
+        run: xcodegen generate
+
+      - name: Build unsigned app
+        if: steps.existing.outputs.published != 'true'
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ScreenTranslatorPro.xcodeproj \
+            -scheme ScreenTranslatorPro \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log
+
+      - name: Verify app version and package IPA
+        if: steps.existing.outputs.published != 'true'
+        run: |
+          set -e
+          APP_PATH='DerivedData/Build/Products/Release-iphoneos/ScreenTranslatorPro.app'
+          test -d "$APP_PATH"
+          INFO_PLIST="$APP_PATH/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")" = '1.0.0'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO_PLIST")" = '1'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")" = 'com.xepes.ScreenTranslatorPro'
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          ditto -c -k --sequesterRsrc --keepParent Payload ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa
+          unzip -t ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa >/dev/null
+          shasum -a 256 ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa > ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa.sha256
+
+      - name: Publish v1.0.0
+        if: steps.existing.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v1.0.0 \
+            ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa \
+            ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa.sha256 \
+            --target "$GITHUB_SHA" \
+            --title 'Screen Translator Pro v1.0.0 (Build 1)' \
+            --notes-file docs/releases/v1.0.0.md
