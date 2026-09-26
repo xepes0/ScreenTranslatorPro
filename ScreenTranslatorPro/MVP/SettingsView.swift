@@ -58,8 +58,8 @@ struct SettingsView: View {
                     hero
                     translationSection
                     providerSection
-                    shortcutSection
                     saveButton
+                    shortcutSection
 
                     Text(versionText)
                         .font(.caption2)
@@ -726,7 +726,7 @@ struct SettingsView: View {
         ) as? String ?? "0.2.0"
         let build = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleVersion"
-        ) as? String ?? "25"
+        ) as? String ?? "26"
         return "Screen Translator Pro · v\(version)-beta\(build)"
     }
 
