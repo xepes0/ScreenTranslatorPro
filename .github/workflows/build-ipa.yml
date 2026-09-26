@@ -43,16 +43,21 @@ jobs:
         run: |
           APP_PATH="DerivedData/Build/Products/Release-iphoneos/ScreenTranslatorPro.app"
           test -d "$APP_PATH"
-          rm -rf Payload ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = '屏幕翻译'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = '1.0.0'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = '2'
+          test -f "$APP_PATH/PrivacyInfo.xcprivacy"
+          plutil -lint "$APP_PATH/PrivacyInfo.xcprivacy"
+          rm -rf Payload ScreenTranslatorPro-v1.0.0-build2-unsigned.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          ditto -c -k --sequesterRsrc --keepParent Payload ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa
+          ditto -c -k --sequesterRsrc --keepParent Payload ScreenTranslatorPro-v1.0.0-build2-unsigned.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: ScreenTranslatorPro-v1.0.0-build1
+          name: ScreenTranslatorPro-v1.0.0-build2
           path: |
-            ScreenTranslatorPro-v1.0.0-build1-unsigned.ipa
+            ScreenTranslatorPro-v1.0.0-build2-unsigned.ipa
             xcodebuild.log
           if-no-files-found: error

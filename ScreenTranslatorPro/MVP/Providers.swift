@@ -714,6 +714,14 @@ private actor TranslationMemory {
         scheduleSave()
     }
 
+    func clear() {
+        saveTask?.cancel()
+        saveTask = nil
+        values.removeAll()
+        order.removeAll()
+        try? FileManager.default.removeItem(at: Self.fileURL)
+    }
+
     private func touch(_ key: String) {
         if let index = order.firstIndex(of: key) {
             order.remove(at: index)
@@ -734,6 +742,15 @@ private actor TranslationMemory {
         let snapshot = Snapshot(values: values, order: order)
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: Self.fileURL, options: .atomic)
+    }
+}
+
+enum TranslationDataStore {
+    static func clearCache() async {
+        await TranslationMemory.shared.clear()
+        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ScreenTranslatorPro", isDirectory: true)
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("latest-translated.png"))
     }
 }
 

@@ -20,6 +20,8 @@ struct SettingsView: View {
     @State private var showOpenAIKey = false
     @State private var editingSourceLanguage = false
     @State private var editingTargetLanguage = false
+    @State private var remoteTranslationConsent = false
+    @State private var showingClearConfirmation = false
 
     private struct LanguageOption: Identifiable {
         let code: String
@@ -58,8 +60,12 @@ struct SettingsView: View {
                     hero
                     translationSection
                     providerSection
+                    if provider.wrappedValue != .localOCR {
+                        privacyDisclosureSection
+                    }
                     saveButton
                     shortcutSection
+                    privacySection
 
                     Text(versionText)
                         .font(.caption2)
@@ -74,6 +80,29 @@ struct SettingsView: View {
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
         .onAppear(perform: load)
+        .onChange(of: providerRaw) { _, newValue in
+            let selected = ProviderKind(rawValue: newValue) ?? .localOCR
+            remoteTranslationConsent = AppConfiguration.hasRemoteTranslationConsent(for: selected)
+        }
+        .onChange(of: remoteTranslationConsent) { _, allowed in
+            let selected = provider.wrappedValue
+            guard selected != .localOCR else { return }
+            UserDefaults.standard.set(
+                allowed,
+                forKey: AppConfiguration.remoteTranslationConsentKey(for: selected)
+            )
+        }
+        .confirmationDialog(
+            "清除本机数据？",
+            isPresented: $showingClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("清除设置、密钥和翻译缓存", role: .destructive) {
+                Task { await clearLocalData() }
+            }
+        } message: {
+            Text("此操作不会删除已发送给第三方翻译服务的数据。")
+        }
     }
 
     private var background: some View {
@@ -131,10 +160,10 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("屏幕翻译")
                     .font(.system(size: 25, weight: .bold))
-                Text("一键翻译屏幕上的任何内容")
+                Text("一键翻译截图中的文字")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
-                Text("Screen Translator Pro")
+                Text("截图识别 · 原位翻译")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Color.secondary.opacity(0.76))
             }
@@ -429,7 +458,7 @@ struct SettingsView: View {
                 .frame(width: 32, height: 32)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            Text("Screen Translator Pro")
+            Text("屏幕翻译")
                 .font(.system(size: 11, weight: .semibold))
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
@@ -440,6 +469,67 @@ struct SettingsView: View {
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var privacyDisclosureSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader(
+                icon: "hand.raised.fill",
+                title: "发送前请确认",
+                detail: "截图内容可能包含个人信息"
+            )
+
+            card {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(remoteDataDescription)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Toggle("我同意向该服务发送上述内容", isOn: $remoteTranslationConsent)
+                        .font(.system(size: 14, weight: .medium))
+                        .tint(accentBlue)
+
+                    Text("同意仅对当前服务生效，可在此关闭。未同意时，App 和快捷指令都不会发送截图内容。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var remoteDataDescription: String {
+        switch provider.wrappedValue {
+        case .baiduImageOpen:
+            return "整张截图、所选语言和请求所需凭据会发送到百度图片翻译服务。"
+        case .openAICompatible:
+            return "识别出的文字、所选语言和 API Key 会发送到你填写的 Endpoint；该地址可能属于第三方 AI 服务。"
+        case .deepL:
+            return "识别出的文字、所选语言和 Auth Key 会发送到 DeepL。"
+        case .baiduFast, .baiduText:
+            return "识别出的文字和所选语言会发送到百度翻译服务，请求使用你配置的凭据签名。"
+        case .localOCR:
+            return "本地 OCR 不发送截图内容。"
+        }
+    }
+
+    private var privacySection: some View {
+        VStack(spacing: 2) {
+            Link(destination: AppConfiguration.privacyPolicyURL) {
+                Label("隐私政策", systemImage: "hand.raised")
+                    .foregroundStyle(accentBlue)
+            }
+            Button(role: .destructive) {
+                showingClearConfirmation = true
+            } label: {
+                Label("清除本机数据", systemImage: "trash")
+                    .foregroundStyle(.red)
+            }
+        }
+        .font(.system(size: 14, weight: .medium))
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
     }
 
     private var saveButton: some View {
@@ -475,7 +565,7 @@ struct SettingsView: View {
             if let saveMessage {
                 Text(saveMessage)
                     .font(.footnote)
-                    .foregroundStyle(saveMessage == "已保存" ? Color.green : Color.red)
+                    .foregroundStyle(saveMessage.hasPrefix("已") ? Color.green : Color.red)
             }
         }
     }
@@ -726,8 +816,8 @@ struct SettingsView: View {
         ) as? String ?? "1.0.0"
         let build = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleVersion"
-        ) as? String ?? "1"
-        return "Screen Translator Pro · v\(version) (\(build))"
+        ) as? String ?? "2"
+        return "屏幕翻译 · v\(version) (\(build))"
     }
 
     private func load() {
@@ -737,6 +827,7 @@ struct SettingsView: View {
         openAIKey = SecretStore.shared.read(.openAIKey) ?? ""
         openAIEndpoint = AppConfiguration.openAIEndpoint
         openAIModel = AppConfiguration.openAIModel
+        remoteTranslationConsent = AppConfiguration.hasRemoteTranslationConsent(for: provider.wrappedValue)
     }
 
     private func save() {
@@ -757,9 +848,44 @@ struct SettingsView: View {
             try SecretStore.shared.write(baiduSecret, for: .baiduSecret)
             try SecretStore.shared.write(deepLKey, for: .deepLKey)
             try SecretStore.shared.write(openAIKey, for: .openAIKey)
-            saveMessage = "已保存"
+            if provider.wrappedValue != .localOCR {
+                UserDefaults.standard.set(
+                    remoteTranslationConsent,
+                    forKey: AppConfiguration.remoteTranslationConsentKey(for: provider.wrappedValue)
+                )
+            }
+            saveMessage = provider.wrappedValue == .localOCR || remoteTranslationConsent
+                ? "已保存"
+                : "已保存；未授权向翻译服务发送内容"
         } catch {
             saveMessage = error.localizedDescription
         }
+    }
+
+    @MainActor
+    private func clearLocalData() async {
+        await TranslationDataStore.clearCache()
+        SecretStore.shared.deleteAll()
+
+        let defaults = UserDefaults.standard
+        for key in [
+            AppConfiguration.baiduAppIDKey,
+            AppConfiguration.openAIEndpointKey,
+            AppConfiguration.openAIModelKey,
+            "translatedPreviewPending",
+            "ScreenTranslatorPro.returnTargetBundleID"
+        ] {
+            defaults.removeObject(forKey: key)
+        }
+        for item in ProviderKind.allCases where item != .localOCR {
+            defaults.removeObject(forKey: AppConfiguration.remoteTranslationConsentKey(for: item))
+        }
+
+        providerRaw = ProviderKind.localOCR.rawValue
+        sourceLanguage = "auto"
+        targetLanguage = "zh"
+        remoteTranslationConsent = false
+        load()
+        saveMessage = "已清除本机数据"
     }
 }

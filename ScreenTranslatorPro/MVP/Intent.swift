@@ -28,7 +28,7 @@ struct TranslateScreenshotIntent: AppIntent {
         return .result(
             value: IntentFile(
                 data: png,
-                filename: "ScreenTranslatorPro-Translated.png",
+                filename: "屏幕翻译-译图.png",
                 type: .png
             )
         )
@@ -40,6 +40,7 @@ struct ScreenTranslatorAppShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: TranslateScreenshotIntent(),
             phrases: [
+                "用\(.applicationName)翻译截图",
                 "Translate screen with \(.applicationName)",
                 "Translate screenshot with \(.applicationName)"
             ],
