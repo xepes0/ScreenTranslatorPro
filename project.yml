@@ -7,7 +7,7 @@ settings:
   base:
     SWIFT_VERSION: "5.10"
     MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "1"
+    CURRENT_PROJECT_VERSION: "2"
 targets:
   ScreenTranslatorPro:
     type: application
@@ -34,7 +34,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.xepes.ScreenTranslatorPro
         PRODUCT_NAME: ScreenTranslatorPro
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Screen Translator Pro
+        INFOPLIST_KEY_CFBundleDisplayName: 屏幕翻译
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         TARGETED_DEVICE_FAMILY: "1,2"

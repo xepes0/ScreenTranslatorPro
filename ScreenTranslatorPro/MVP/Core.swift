@@ -4,8 +4,6 @@ import UIKit
 import ImageIO
 import CoreImage
 import Security
-import ObjectiveC.runtime
-import Darwin
 
 struct OCRResult: Identifiable, Sendable {
     let id: UUID
@@ -51,6 +49,7 @@ enum ScreenTranslatorError: LocalizedError {
     case invalidImage, noTextFound
     case missingCredential(String)
     case invalidResponse(String)
+    case remoteTranslationConsentRequired
 
     var errorDescription: String? {
         switch self {
@@ -58,6 +57,7 @@ enum ScreenTranslatorError: LocalizedError {
         case .noTextFound: return "截图中没有识别到文字。"
         case .missingCredential(let value): return "缺少配置：\(value)"
         case .invalidResponse(let value): return "翻译服务返回异常：\(value)"
+        case .remoteTranslationConsentRequired: return "请先在设置中同意向所选翻译服务发送截图内容。"
         }
     }
 }
@@ -69,6 +69,15 @@ enum AppConfiguration {
     static let baiduAppIDKey = "baiduAppID"
     static let openAIEndpointKey = "openAIEndpoint"
     static let openAIModelKey = "openAIModel"
+    static let privacyPolicyURL = URL(string: "https://github.com/xepes0/ScreenTranslatorPro/blob/main/PRIVACY.md")!
+
+    static func remoteTranslationConsentKey(for provider: ProviderKind) -> String {
+        "remoteTranslationConsent.\(provider.rawValue)"
+    }
+
+    static func hasRemoteTranslationConsent(for provider: ProviderKind) -> Bool {
+        provider == .localOCR || UserDefaults.standard.bool(forKey: remoteTranslationConsentKey(for: provider))
+    }
 
     static var provider: ProviderKind {
         ProviderKind(rawValue: UserDefaults.standard.string(forKey: providerKey) ?? "") ?? .localOCR
@@ -82,7 +91,7 @@ enum AppConfiguration {
     static var openAIModel: String { UserDefaults.standard.string(forKey: openAIModelKey) ?? "gpt-4.1-mini" }
 }
 
-enum SecretKey: String {
+enum SecretKey: String, CaseIterable {
     case baiduSecret
     case baiduCloudAPIKey
     case baiduCloudSecretKey
@@ -119,6 +128,17 @@ final class SecretStore: @unchecked Sendable {
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
               let data = item as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    func deleteAll() {
+        for key in SecretKey.allCases {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: key.rawValue
+            ]
+            SecItemDelete(query as CFDictionary)
+        }
     }
 }
 
@@ -1593,6 +1613,10 @@ final class ScreenTranslationEngine {
         let target = AppConfiguration.targetLanguage
         let providerKind = AppConfiguration.provider
 
+        guard AppConfiguration.hasRemoteTranslationConsent(for: providerKind) else {
+            throw ScreenTranslatorError.remoteTranslationConsentRequired
+        }
+
         if providerKind == .baiduImageOpen {
             let provider = BaiduOpenPlatformImageTranslator(
                 appID: AppConfiguration.baiduAppID,
@@ -1673,140 +1697,5 @@ final class ScreenTranslationEngine {
         } else {
             print("[STP] \(phase)=\(milliseconds)ms")
         }
-    }
-}
-
-
-extension Notification.Name {
-    static let translatedPreviewReady = Notification.Name("ScreenTranslatorPro.translatedPreviewReady")
-}
-
-enum PreviewStore {
-    private static let pendingKey = "translatedPreviewPending"
-
-    private static var fileURL: URL {
-        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ScreenTranslatorPro", isDirectory: true)
-        try? FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true
-        )
-        return directory.appendingPathComponent("latest-translated.png")
-    }
-
-    static func save(_ image: UIImage) throws {
-        guard let data = image.pngData() else {
-            throw ScreenTranslatorError.invalidImage
-        }
-        try data.write(to: fileURL, options: .atomic)
-        UserDefaults.standard.set(true, forKey: pendingKey)
-        NotificationCenter.default.post(name: .translatedPreviewReady, object: nil)
-    }
-
-    static func loadPendingImage() -> UIImage? {
-        guard UserDefaults.standard.bool(forKey: pendingKey) else { return nil }
-        guard let data = try? Data(contentsOf: fileURL) else { return nil }
-        return UIImage(data: data)
-    }
-
-    static func markPresented() {
-        UserDefaults.standard.set(false, forKey: pendingKey)
-    }
-
-    static func clear() {
-        UserDefaults.standard.set(false, forKey: pendingKey)
-        try? FileManager.default.removeItem(at: fileURL)
-    }
-}
-
-
-enum ReturnTargetStore {
-    private static let bundleIDKey = "ScreenTranslatorPro.returnTargetBundleID"
-
-    static func captureFrontmostApplication() {
-        guard
-            let bundleID = PrivateApplicationBridge.frontmostBundleIdentifier(),
-            !bundleID.isEmpty,
-            bundleID != Bundle.main.bundleIdentifier,
-            bundleID != "com.apple.springboard"
-        else { return }
-
-        UserDefaults.standard.set(bundleID, forKey: bundleIDKey)
-    }
-
-    @discardableResult
-    static func openCapturedApplication() -> Bool {
-        guard
-            let bundleID = UserDefaults.standard.string(forKey: bundleIDKey),
-            !bundleID.isEmpty,
-            bundleID != Bundle.main.bundleIdentifier
-        else { return false }
-
-        return PrivateApplicationBridge.openApplication(bundleIdentifier: bundleID)
-    }
-
-    static var capturedBundleIdentifier: String? {
-        UserDefaults.standard.string(forKey: bundleIDKey)
-    }
-}
-
-private enum PrivateApplicationBridge {
-    typealias FrontmostFunction = @convention(c) () -> Unmanaged<CFString>?
-
-    static func frontmostBundleIdentifier() -> String? {
-        let frameworkPath = "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices"
-        guard let handle = dlopen(frameworkPath, RTLD_LAZY) else { return nil }
-        defer { dlclose(handle) }
-
-        guard let symbol = dlsym(handle, "SBSCopyFrontmostApplicationDisplayIdentifier") else {
-            return nil
-        }
-
-        let function = unsafeBitCast(symbol, to: FrontmostFunction.self)
-        guard let value = function()?.takeRetainedValue() else { return nil }
-        return value as String
-    }
-
-    static func openApplication(bundleIdentifier: String) -> Bool {
-        guard
-            let workspaceClass: AnyClass = NSClassFromString("LSApplicationWorkspace"),
-            let defaultMethod = class_getClassMethod(
-                workspaceClass,
-                NSSelectorFromString("defaultWorkspace")
-            )
-        else { return false }
-
-        typealias DefaultWorkspaceFunction = @convention(c) (AnyClass, Selector) -> Unmanaged<AnyObject>
-        let defaultImplementation = method_getImplementation(defaultMethod)
-        let defaultWorkspace = unsafeBitCast(
-            defaultImplementation,
-            to: DefaultWorkspaceFunction.self
-        )
-        let defaultSelector = NSSelectorFromString("defaultWorkspace")
-        let workspace = defaultWorkspace(
-            workspaceClass,
-            defaultSelector
-        ).takeUnretainedValue()
-
-        let selectors = [
-            NSSelectorFromString("openApplicationWithBundleID:"),
-            NSSelectorFromString("openApplicationWithBundleIdentifier:")
-        ]
-
-        for selector in selectors {
-            guard
-                let method = class_getInstanceMethod(workspaceClass, selector)
-            else { continue }
-
-            typealias OpenFunction = @convention(c) (AnyObject, Selector, NSString) -> Bool
-            let implementation = method_getImplementation(method)
-            let open = unsafeBitCast(implementation, to: OpenFunction.self)
-
-            if open(workspace, selector, bundleIdentifier as NSString) {
-                return true
-            }
-        }
-
-        return false
     }
 }

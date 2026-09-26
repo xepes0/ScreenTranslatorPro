@@ -83,7 +83,7 @@ struct ContentView: View {
                 .shadow(color: blue.opacity(0.18), radius: 8, y: 4)
             VStack(alignment: .leading, spacing: 2) {
                 Text("屏幕翻译").font(.system(size: 20, weight: .bold))
-                Text("Screen Translator Pro")
+                Text("截图识别 · 原位翻译")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -256,7 +256,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 0) {
                 guideStep("1", icon: "viewfinder", title: "截屏", detail: "在快捷指令中截取当前画面")
                 Divider().padding(.leading, 58)
-                guideStep("2", icon: "character.bubble.fill", title: "翻译截图", detail: "选择 Screen Translator Pro 的动作")
+                guideStep("2", icon: "character.bubble.fill", title: "翻译截图", detail: "选择「屏幕翻译」的动作")
                 Divider().padding(.leading, 58)
                 guideStep("3", icon: "eye.fill", title: "快速查看", detail: "用系统预览查看原位译图")
                 Text("将这条快捷指令绑定到背部轻点等触发方式，即可在其他 App 中使用。")
@@ -296,8 +296,8 @@ struct ContentView: View {
 
     private var versionText: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
-        return "Screen Translator Pro · v\(version) (\(build))"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "2"
+        return "屏幕翻译 · v\(version) (\(build))"
     }
 
     private func languageName(_ code: String) -> String {
